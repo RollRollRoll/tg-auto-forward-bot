@@ -70,13 +70,45 @@ async def extract_available_resolutions(url: str) -> list[int]:
     info = await loop.run_in_executor(None, _do_extract, ydl_opts, url)
 
     formats = info.get("formats") or []
-    heights: set[int] = set()
+    sides: set[int] = set()
     for f in formats:
-        h = f.get("height")
-        if h and h > 0:
-            heights.add(h)
+        side = _short_side(f)
+        if side:
+            sides.add(side)
 
-    return sorted(heights)
+    return sorted(sides)
+
+
+def _short_side(f: dict) -> int | None:
+    # 分辨率按短边计算：横屏取高度，竖屏取宽度（1080x1920 的竖屏视频算 1080p）
+    w, h = f.get("width"), f.get("height")
+    if h and h > 0:
+        return min(w, h) if w and w > 0 else h
+    return None
+
+
+def _build_format_spec(max_resolution: int) -> str:
+    # 短边不超过 max_resolution：横屏（宽高比 >= 1）限制高度，竖屏限制宽度
+    limits = (
+        f"[aspect_ratio>=1][height<={max_resolution}]",
+        f"[aspect_ratio<1][width<={max_resolution}]",
+    )
+    # 按优先级依次尝试：H.264 + AAC → H.264 + 任意音频 → H.264 单文件 → 任意编码。
+    # bestvideo* 会把音视频合一的格式也算进来，避免低分辨率的合一格式抢在高分辨率之前被选中
+    templates = (
+        "bestvideo*[vcodec^=avc]{f}+bestaudio[acodec^=mp4a]",
+        "bestvideo*[vcodec^=avc]{f}+bestaudio",
+        "best[vcodec^=avc]{f}",
+        "bestvideo*{f}+bestaudio",
+        "best{f}",
+    )
+    selectors = [t.format(f=lim) for t in templates for lim in limits]
+    # 格式缺少宽度时只能按高度限制（与 _short_side 的口径一致），再不行就不做限制
+    selectors += [
+        f"bestvideo*[height<={max_resolution}]+bestaudio", f"best[height<={max_resolution}]",
+        "bestvideo*+bestaudio", "best",
+    ]
+    return "/".join(selectors)
 
 
 def _do_extract(ydl_opts: dict, url: str) -> dict:
@@ -119,14 +151,7 @@ async def download_video(
     os.chmod(tmp_dir, 0o755)
 
     ydl_opts = {
-        "format": (
-            f"best[vcodec^=avc][acodec^=mp4a][height<={max_resolution}]"
-            f"/bestvideo[vcodec^=avc][height<={max_resolution}]+bestaudio[acodec^=mp4a]"
-            f"/bestvideo[vcodec^=avc][height<={max_resolution}]+bestaudio"
-            f"/best[height<={max_resolution}]"
-            f"/bestvideo[height<={max_resolution}]+bestaudio"
-            f"/best"
-        ),
+        "format": _build_format_spec(max_resolution),
         "outtmpl": os.path.join(tmp_dir, "%(id)s.%(ext)s"),
         "merge_output_format": "mp4",
         "postprocessors": [

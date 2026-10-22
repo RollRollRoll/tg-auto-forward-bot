@@ -9,7 +9,7 @@ Authorized admins send a link to the bot in a private chat, write a caption, pic
 ## Features
 
 - **Multi-platform downloads**: anything yt-dlp supports, with H.264/AAC MP4 preferred for in-app streaming
-- **Per-link resolution picker**: available resolutions are detected from each link, capped by the `max_resolution` setting
+- **Per-link resolution picker**: available resolutions are detected from each link, capped by the `max_resolution` setting. Resolution means the short side, so a 1080×1920 portrait video counts as 1080p
 - **HTML captions**: `<b>` `<i>` `<u>` `<s>` `<a href>` `<code>` `<pre>`, sanitized, up to 1024 visible characters; `/skip` to post without a caption
 - **Multiple channels**: choose the target channel from inline buttons
 - **Task tracking**: `/tasks` shows active downloads with progress bars and elapsed time, plus the 5 most recent tasks
@@ -135,7 +135,7 @@ Settings are stored in SQLite and changed with `/set <key> <value>`.
 |---|---|---|---|
 | `max_concurrent_downloads` | `2` | 1–5 | Number of simultaneous downloads. When all slots are busy, new tasks are rejected and the user is asked to resend the link |
 | `max_file_size_mb` | `2000` | 1–2000 | Downloads larger than this are discarded instead of posted |
-| `max_resolution` | `1080` | 360, 480, 720, 1080, 1440, 2160 | Upper limit for the resolution picker. Higher resolutions are hidden; if a video has none at or below the limit, its lowest resolution is used |
+| `max_resolution` | `1080` | 360, 480, 720, 1080, 1440, 2160 | Upper limit for the resolution picker, measured on the short side (height for landscape, width for portrait). Higher resolutions are hidden; if a video has none at or below the limit, its lowest resolution is used |
 
 ## Cookies (for sites that need a login)
 
