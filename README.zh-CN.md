@@ -12,10 +12,10 @@
 - **按链接选分辨率**：自动探测每个链接实际可用的分辨率，并受 `max_resolution` 设置限制。分辨率按短边计算，1080×1920 的竖屏视频算 1080p
 - **HTML 文案**：支持 `<b>` `<i>` `<u>` `<s>` `<a href>` `<code>` `<pre>`，自动清洗，可见字符最多 1024 个；发送 `/skip` 可不带文案
 - **多频道**：通过内联按钮选择目标频道
-- **任务追踪**：`/tasks` 显示进行中的下载（进度条、已用时间）和最近 5 条任务
+- **任务追踪**：`/tasks` 显示进行中的下载（进度条、已用时间）、排队中的任务和最近 5 条任务
 - **按钮菜单**：`/start` 打开按钮面板（任务、频道、设置、管理员、帮助）
 - **两级权限**：超级管理员由环境变量指定，普通管理员在聊天中增删
-- **并发与磁盘保护**：可配置下载槽位数和文件大小上限，每个任务开始前检查磁盘空间
+- **并发与磁盘保护**：可配置下载槽位数和文件大小上限；槽位全满时新任务按先来后到排队；每个任务开始下载前检查磁盘空间
 - **失败降级**：Telegram 不接受视频格式时，自动改为以文件形式发送
 - **Cookies 支持**：需要登录的站点（如 X/Twitter）可配置 `cookies.txt`
 - **自动维护**：容器每次启动时升级 yt-dlp；启动时清理超过 1 小时的残留下载文件
@@ -28,7 +28,7 @@
   │  1. 发链接  2. 写文案或 /skip  3. 选分辨率  4. 选频道
   ▼
 Bot（python-telegram-bot，long polling）
-  │  后台任务：检查磁盘 → 占用槽位 → yt-dlp + ffmpeg 下载 → send_video
+  │  后台任务：占用槽位（满了就排队）→ 检查磁盘 → yt-dlp + ffmpeg 下载 → send_video
   ▼
 Local Bot API Server ──► Telegram 频道
 ```
@@ -102,7 +102,7 @@ python -m bot.main
 2. 回复文案（支持 HTML），或发送 `/skip` 不带文案。
 3. 选择分辨率。只会列出不超过 `max_resolution` 的分辨率；如果只剩一种，这一步会自动跳过。
 4. 选择目标频道。如果只配置了一个频道，会自动使用它。
-5. Bot 回复 "Task accepted" 后在后台下载，完成后告诉你成功或失败。随时可以用 `/tasks` 查看进度。
+5. Bot 回复 "Task accepted" 后在后台下载，完成后告诉你成功或失败。如果下载槽位全满，Bot 会告诉你排在第几位，等有空闲槽位时自动开始。随时可以用 `/tasks` 查看进度。
 
 任意步骤发送 `/cancel` 可以取消。
 
@@ -112,7 +112,7 @@ python -m bot.main
 |---|---|---|
 | `/start` | 所有人 | 管理员打开按钮菜单，其他人显示帮助 |
 | `/help` | 所有人 | 显示帮助 |
-| `/tasks` | 管理员 | 进行中的下载和最近 5 条任务 |
+| `/tasks` | 管理员 | 进行中的下载、排队中的任务和最近 5 条任务 |
 | `/add_channel <chat_id>` | 管理员 | 添加目标频道（Bot 需已是该频道有发布权限的管理员） |
 | `/remove_channel <chat_id>` | 管理员 | 移除频道 |
 | `/list_channels` | 管理员 | 列出频道 |
@@ -133,7 +133,7 @@ python -m bot.main
 
 | 键 | 默认值 | 允许值 | 说明 |
 |---|---|---|---|
-| `max_concurrent_downloads` | `2` | 1–5 | 同时下载的任务数。槽位全满时新任务会被拒绝，需要重新发送链接 |
+| `max_concurrent_downloads` | `2` | 1–5 | 同时下载的任务数。槽位全满时新任务会排队。调大后从下一个提交的任务开始生效；调小不会中断正在运行的任务 |
 | `max_file_size_mb` | `2000` | 1–2000 | 下载结果超过这个大小会被丢弃，不发布 |
 | `max_resolution` | `1080` | 360、480、720、1080、1440、2160 | 分辨率选择的上限，按短边计算（横屏看高度，竖屏看宽度），更高的分辨率不会列出；如果视频没有不超过上限的分辨率，就使用它最低的那一档 |
 
@@ -232,7 +232,8 @@ docker compose up -d
 |---|---|
 | Bot 完全没有回应 | 你不是管理员，或者是在群里发的。请用 `SUPER_ADMIN_ID` 对应的账号私聊 Bot |
 | `Insufficient disk space` | 剩余空间不足 `max_concurrent_downloads × max_file_size_mb × 2` MB。清理磁盘或调低这两项 |
-| `Server busy (n/n download slots in use)` | 槽位已满。等任务完成后重新发送链接，或调大 `max_concurrent_downloads` |
+| `Your task is queued at position n` | 槽位已满，不需要操作，轮到时会自动开始。想同时跑更多任务，可以调大 `max_concurrent_downloads` |
+| `Bot is restarting, the queued task was cancelled` | 任务还在排队时 Bot 被停止或重启了。队列只保存在内存里，需要重新发送链接 |
 | `No video found at this URL` | 站点不支持、帖子里没有视频，或需要登录。可以试试配置 [Cookies](#cookies-配置需要登录的站点) |
 | `Bad guest token` / 403 | 配置或更新 `cookies.txt` |
 | `Bot is not an admin of this channel...` | 把 Bot 设为频道管理员并开启"发布消息"权限，再执行 `/add_channel` |

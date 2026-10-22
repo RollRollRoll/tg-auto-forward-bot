@@ -2,7 +2,7 @@ import logging
 import os
 
 from telegram import BotCommand
-from telegram.ext import ApplicationBuilder, CallbackQueryHandler, CommandHandler
+from telegram.ext import Application, ApplicationBuilder, CallbackQueryHandler, CommandHandler
 
 from bot.config import API_BASE_URL, BOT_TOKEN, DOWNLOAD_DIR, SUPER_ADMIN_ID
 from bot.database.connection import close_db, init_db
@@ -21,6 +21,16 @@ from bot.services.downloader import DownloadSlotManager, cleanup_stale_files
 
 logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+
+class BotApplication(Application):
+    async def stop(self) -> None:
+        # stop() 会等待所有 create_task 任务结束；先取消排队中的任务，
+        # 否则重启时要等整个队列下载完才能退出
+        slot_manager = self.bot_data.get("slot_manager")
+        if slot_manager is not None:
+            slot_manager.close()
+        await super().stop()
 
 
 async def post_init(application) -> None:
@@ -63,6 +73,7 @@ async def post_stop(application) -> None:
 def main() -> None:
     app = (
         ApplicationBuilder()
+        .application_class(BotApplication)
         .token(BOT_TOKEN)
         .base_url(f"{API_BASE_URL}/bot")
         .base_file_url(f"{API_BASE_URL}/file/bot")

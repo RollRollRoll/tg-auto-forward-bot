@@ -14,26 +14,85 @@ from bot.config import COOKIES_FILE, DOWNLOAD_DIR
 class DownloadSlotManager:
     def __init__(self):
         self._tasks: dict[int, dict] = {}
+        # 排队中的任务，dict 保持插入顺序，即先进先出
+        self._queue: dict[int, dict] = {}
+        self._waiters: dict[int, asyncio.Future] = {}
+        self._max_slots: int = 1
         self._next_id: int = 0
+        self._closed: bool = False
         self._lock = asyncio.Lock()
 
     @property
     def active_count(self) -> int:
         return len(self._tasks)
 
-    async def try_acquire_slot(self, max_slots: int, *, url: str = "", user_id: int = 0) -> int | None:
+    @property
+    def queued_count(self) -> int:
+        return len(self._queue)
+
+    async def enqueue(self, max_slots: int, *, url: str = "", user_id: int = 0) -> tuple[int, int] | None:
+        """登记一个任务，返回 (task_id, 排队位置)。
+
+        有空闲槽位时直接占用，位置为 0；否则进入队列，位置从 1 开始，
+        之后需要调用 wait_for_slot() 等待轮到自己。已关闭时返回 None。
+        """
         async with self._lock:
-            if len(self._tasks) >= max_slots:
+            if self._closed:
                 return None
+            # 每次登记都以最新的并发设置为准；设置调大后可以立刻放行排队任务
+            self._max_slots = max_slots
+            self._promote()
             self._next_id += 1
-            self._tasks[self._next_id] = {
+            task_id = self._next_id
+            info = {
                 "url": url,
                 "user_id": user_id,
                 "start_time": time.time(),
                 "progress": 0.0,
                 "status": "waiting",
             }
-            return self._next_id
+            # 队列里还有人时不能插队，即使恰好有空闲槽位
+            if not self._queue and len(self._tasks) < max_slots:
+                self._tasks[task_id] = info
+                return task_id, 0
+            info["status"] = "queued"
+            self._queue[task_id] = info
+            self._waiters[task_id] = asyncio.get_running_loop().create_future()
+            return task_id, len(self._queue)
+
+    async def wait_for_slot(self, task_id: int) -> bool:
+        """等待排队任务拿到槽位。拿到返回 True；管理器关闭时返回 False。"""
+        waiter = self._waiters.get(task_id)
+        if waiter is None:
+            return task_id in self._tasks
+        return await waiter
+
+    def _promote(self) -> None:
+        # 按入队顺序把排队任务移入空闲槽位
+        while self._queue and len(self._tasks) < self._max_slots:
+            task_id = next(iter(self._queue))
+            info = self._queue.pop(task_id)
+            waiter = self._waiters.pop(task_id, None)
+            if waiter is None or waiter.done():
+                # 等待方已被取消，跳过，不占用槽位
+                continue
+            info["status"] = "waiting"
+            info["start_time"] = time.time()
+            self._tasks[task_id] = info
+            waiter.set_result(True)
+
+    def close(self) -> None:
+        """停止接收新任务，并让所有排队任务的 wait_for_slot() 返回 False。
+
+        Application.stop() 会等待所有后台任务结束，所以必须在它之前调用，
+        否则重启时要等整个队列下载完才能退出。
+        """
+        self._closed = True
+        for waiter in self._waiters.values():
+            if not waiter.done():
+                waiter.set_result(False)
+        self._waiters.clear()
+        self._queue.clear()
 
     def update_progress(self, task_id: int, progress: float, status: str = "downloading") -> None:
         if task_id in self._tasks:
@@ -44,17 +103,30 @@ class DownloadSlotManager:
         async with self._lock:
             if task_id is not None:
                 self._tasks.pop(task_id, None)
+                # 排队中途结束的任务（如发送排队通知失败）也要移出队列
+                self._queue.pop(task_id, None)
+                waiter = self._waiters.pop(task_id, None)
+                if waiter is not None and not waiter.done():
+                    waiter.cancel()
             else:
                 # fallback: remove the oldest task
                 if self._tasks:
                     oldest = min(self._tasks)
                     del self._tasks[oldest]
+            self._promote()
 
     def get_active_tasks(self) -> list[dict]:
         now = time.time()
         return [
             {"task_id": tid, "elapsed": now - t["start_time"], **t}
             for tid, t in self._tasks.items()
+        ]
+
+    def get_queued_tasks(self) -> list[dict]:
+        now = time.time()
+        return [
+            {"task_id": tid, "position": pos, "elapsed": now - t["start_time"], **t}
+            for pos, (tid, t) in enumerate(self._queue.items(), start=1)
         ]
 
 

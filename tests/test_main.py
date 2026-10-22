@@ -2,7 +2,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from bot.main import main, post_stop
+from bot.main import BotApplication, main, post_stop
 
 
 @pytest.mark.asyncio
@@ -18,6 +18,7 @@ def test_main_registers_post_stop_hook():
     app = MagicMock()
     app.bot_data = {}
 
+    builder.application_class.return_value = builder
     builder.token.return_value = builder
     builder.base_url.return_value = builder
     builder.base_file_url.return_value = builder
@@ -32,5 +33,6 @@ def test_main_registers_post_stop_hook():
         main()
 
     builder.post_stop.assert_called_once_with(post_stop)
+    builder.application_class.assert_called_once_with(BotApplication)
     app.add_handler.assert_any_call("conversation_handler")
     app.run_polling.assert_called_once()

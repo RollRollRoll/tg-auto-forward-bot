@@ -21,19 +21,41 @@ async def download_and_publish(
     max_concurrent = int(await get_setting(db, "max_concurrent_downloads") or "2")
     max_file_size = int(await get_setting(db, "max_file_size_mb") or "2000")
 
-    # Disk check BEFORE slot acquisition (per spec)
+    entry = await slot_manager.enqueue(max_concurrent, url=source_url, user_id=user_id)
+    if entry is None:
+        await bot.send_message(chat_id=user_chat_id, text="Bot is shutting down, please resend your link later.")
+        return
+    task_id, position = entry
+
+    try:
+        if position > 0:
+            await bot.send_message(
+                chat_id=user_chat_id,
+                text=f"All {max_concurrent} download slots are busy. Your task is queued at position {position} and will start automatically.",
+            )
+            if not await slot_manager.wait_for_slot(task_id):
+                await bot.send_message(chat_id=user_chat_id, text="Bot is restarting, the queued task was cancelled. Please resend your link.")
+                return
+
+        await _run_task(
+            bot=bot, db=db, slot_manager=slot_manager, task_id=task_id,
+            user_chat_id=user_chat_id, user_id=user_id, source_url=source_url,
+            caption=caption, channel_chat_id=channel_chat_id,
+            max_resolution=max_resolution, max_concurrent=max_concurrent, max_file_size=max_file_size,
+        )
+    finally:
+        await slot_manager.release_slot(task_id)
+
+
+async def _run_task(
+    *, bot: Bot, db, slot_manager: DownloadSlotManager, task_id: int,
+    user_chat_id: int, user_id: int, source_url: str, caption: str,
+    channel_chat_id: int, max_resolution: int, max_concurrent: int, max_file_size: int,
+) -> None:
+    # 拿到槽位后再检查磁盘：排队期间剩余空间可能已经变化
     has_space, free_mb = check_disk_space(max_concurrent, max_file_size)
     if not has_space:
         await bot.send_message(chat_id=user_chat_id, text="Insufficient disk space, please try again later.")
-        return
-
-    task_id = await slot_manager.try_acquire_slot(max_concurrent, url=source_url, user_id=user_id)
-    if task_id is None:
-        active = slot_manager.active_count
-        await bot.send_message(
-            chat_id=user_chat_id,
-            text=f"Server busy ({active}/{max_concurrent} download slots in use). Please resend your link to try again.",
-        )
         return
 
     def _progress_hook(d: dict) -> None:
@@ -81,6 +103,6 @@ async def download_and_publish(
             await update_post_log_status(db, log_id, status="failed", error_message=str(e))
         await bot.send_message(chat_id=user_chat_id, text=f"Download failed: {e}")
     finally:
-        await slot_manager.release_slot(task_id)
+        # 槽位由外层 download_and_publish 统一释放
         if tmp_dir:
             shutil.rmtree(tmp_dir, ignore_errors=True)

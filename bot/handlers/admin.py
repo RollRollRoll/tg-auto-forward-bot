@@ -220,6 +220,16 @@ async def format_tasks_text(slot_manager) -> str:
         lines.append(f"<b>Active Downloads (0/{max_concurrent}):</b>")
         lines.append("No active tasks.\n")
 
+    queued_tasks = slot_manager.get_queued_tasks()
+    if queued_tasks:
+        lines.append(f"<b>Queued ({len(queued_tasks)}):</b>")
+        for t in queued_tasks:
+            url = t["url"]
+            if len(url) > 45:
+                url = url[:45] + "..."
+            lines.append(f"  {t['position']}. <code>{url}</code> (waiting {_format_elapsed(t['elapsed'])})")
+        lines.append("")
+
     recent = await list_recent_post_logs(db, limit=5)
     if recent:
         lines.append("<b>Recent Tasks:</b>")

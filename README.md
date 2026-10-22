@@ -12,10 +12,10 @@ Authorized admins send a link to the bot in a private chat, write a caption, pic
 - **Per-link resolution picker**: available resolutions are detected from each link, capped by the `max_resolution` setting. Resolution means the short side, so a 1080×1920 portrait video counts as 1080p
 - **HTML captions**: `<b>` `<i>` `<u>` `<s>` `<a href>` `<code>` `<pre>`, sanitized, up to 1024 visible characters; `/skip` to post without a caption
 - **Multiple channels**: choose the target channel from inline buttons
-- **Task tracking**: `/tasks` shows active downloads with progress bars and elapsed time, plus the 5 most recent tasks
+- **Task tracking**: `/tasks` shows active downloads with progress bars and elapsed time, the queue, and the 5 most recent tasks
 - **Inline dashboard**: `/start` opens a button menu (Tasks, Channels, Settings, Admins, Help)
 - **Two-level permissions**: a super admin set by env var, plus admins managed from the chat
-- **Concurrency and disk guards**: configurable download slots and file size limit, disk space check before each task
+- **Concurrency and disk guards**: configurable download slots and file size limit; when all slots are busy, new tasks wait in a first-in-first-out queue; disk space is checked before each download starts
 - **Graceful fallback**: if Telegram rejects the file as a video, it is sent as a document instead
 - **Cookies support**: use a `cookies.txt` for sites that need a login (e.g. X/Twitter)
 - **Self-maintaining**: yt-dlp is upgraded on every container start; stale downloads older than 1 hour are removed on startup
@@ -28,7 +28,7 @@ Admin (private chat)
   │  1. send link  2. caption or /skip  3. pick resolution  4. pick channel
   ▼
 Bot (python-telegram-bot, long polling)
-  │  background task: disk check → acquire slot → yt-dlp + ffmpeg → send_video
+  │  background task: acquire slot (or wait in queue) → disk check → yt-dlp + ffmpeg → send_video
   ▼
 Local Bot API Server ──► Telegram channel
 ```
@@ -102,7 +102,7 @@ All interaction happens in a **private chat** with the bot. Messages in groups a
 2. Reply with a caption (HTML allowed), or send `/skip` to post without one.
 3. Pick a resolution. Only resolutions up to `max_resolution` are offered; if just one remains, this step is skipped.
 4. Pick the target channel. If only one channel is configured, it is used automatically.
-5. The bot replies "Task accepted", downloads in the background and reports success or failure. Check progress any time with `/tasks`.
+5. The bot replies "Task accepted", downloads in the background and reports success or failure. If all download slots are busy, it tells you your queue position and starts the task automatically when a slot frees up. Check progress any time with `/tasks`.
 
 Send `/cancel` at any step to abort.
 
@@ -112,7 +112,7 @@ Send `/cancel` at any step to abort.
 |---|---|---|
 | `/start` | Everyone | Admins get the button menu; others get the help text |
 | `/help` | Everyone | Show help text |
-| `/tasks` | Admin | Active downloads and the 5 most recent tasks |
+| `/tasks` | Admin | Active downloads, queued tasks and the 5 most recent tasks |
 | `/add_channel <chat_id>` | Admin | Add a target channel (the bot must already be an admin there with posting rights) |
 | `/remove_channel <chat_id>` | Admin | Remove a channel |
 | `/list_channels` | Admin | List channels |
@@ -133,7 +133,7 @@ Settings are stored in SQLite and changed with `/set <key> <value>`.
 
 | Key | Default | Allowed values | Description |
 |---|---|---|---|
-| `max_concurrent_downloads` | `2` | 1–5 | Number of simultaneous downloads. When all slots are busy, new tasks are rejected and the user is asked to resend the link |
+| `max_concurrent_downloads` | `2` | 1–5 | Number of simultaneous downloads. When all slots are busy, new tasks are queued. A higher value takes effect when the next task is submitted; lowering it does not stop tasks that are already running |
 | `max_file_size_mb` | `2000` | 1–2000 | Downloads larger than this are discarded instead of posted |
 | `max_resolution` | `1080` | 360, 480, 720, 1080, 1440, 2160 | Upper limit for the resolution picker, measured on the short side (height for landscape, width for portrait). Higher resolutions are hidden; if a video has none at or below the limit, its lowest resolution is used |
 
@@ -232,7 +232,8 @@ Data lives in two named volumes: `bot-data` (SQLite database and `cookies.txt`) 
 |---|---|
 | Bot does not respond at all | You are not an admin, or you wrote in a group. Use a private chat with the account set as `SUPER_ADMIN_ID` |
 | `Insufficient disk space` | Free space is below `max_concurrent_downloads × max_file_size_mb × 2` MB. Free up space or lower these settings |
-| `Server busy (n/n download slots in use)` | All slots are taken. Wait for a task to finish and resend the link, or raise `max_concurrent_downloads` |
+| `Your task is queued at position n` | All slots are taken. No action needed, the task starts automatically. To run more tasks at once, raise `max_concurrent_downloads` |
+| `Bot is restarting, the queued task was cancelled` | The bot was stopped or restarted while the task was still queued. The queue is kept in memory only, so resend the link |
 | `No video found at this URL` | The site is unsupported, the post has no video, or a login is needed. Try [cookies](#cookies-for-sites-that-need-a-login) |
 | `Bad guest token` / 403 | Configure or refresh `cookies.txt` |
 | `Bot is not an admin of this channel...` | Add the bot as a channel admin with "Post Messages" permission, then retry `/add_channel` |
