@@ -163,6 +163,8 @@ docker compose logs bot | head -5
 
 The upgrade needs network access to PyPI. If it fails, the bot still starts with the version already installed in the image.
 
+All dependencies in `requirements.txt` are pinned to exact versions. The pinned yt-dlp version is only the baseline baked into the image; at runtime the container uses the latest release. To keep yt-dlp fixed as well, remove the `pip install` line from `entrypoint.sh`.
+
 ## Deploying to a Remote Server
 
 ### Option A: build locally, ship the image

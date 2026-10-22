@@ -163,6 +163,8 @@ docker compose logs bot | head -5
 
 升级需要能访问 PyPI。升级失败时，Bot 仍会用镜像里已有的版本启动。
 
+`requirements.txt` 里的依赖都固定了精确版本。其中 yt-dlp 的版本只是打进镜像的基线，容器运行时用的是最新版。如果想让 yt-dlp 也固定不变，删掉 `entrypoint.sh` 里的 `pip install` 那一行即可。
+
 ## 远程服务器部署
 
 ### 方案 A：本地构建，上传镜像
