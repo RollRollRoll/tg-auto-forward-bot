@@ -9,7 +9,7 @@ Authorized admins send a link to the bot in a private chat, write a caption, pic
 ## Features
 
 - **Multi-platform downloads**: anything yt-dlp supports, with H.264/AAC MP4 preferred for in-app streaming
-- **Per-link resolution picker**: available resolutions are detected from each link
+- **Per-link resolution picker**: available resolutions are detected from each link, capped by the `max_resolution` setting
 - **HTML captions**: `<b>` `<i>` `<u>` `<s>` `<a href>` `<code>` `<pre>`, sanitized, up to 1024 visible characters; `/skip` to post without a caption
 - **Multiple channels**: choose the target channel from inline buttons
 - **Task tracking**: `/tasks` shows active downloads with progress bars and elapsed time, plus the 5 most recent tasks
@@ -100,7 +100,7 @@ All interaction happens in a **private chat** with the bot. Messages in groups a
 
 1. Send a message containing a video link.
 2. Reply with a caption (HTML allowed), or send `/skip` to post without one.
-3. Pick a resolution. If the link has only one resolution, this step is skipped.
+3. Pick a resolution. Only resolutions up to `max_resolution` are offered; if just one remains, this step is skipped.
 4. Pick the target channel. If only one channel is configured, it is used automatically.
 5. The bot replies "Task accepted", downloads in the background and reports success or failure. Check progress any time with `/tasks`.
 
@@ -135,7 +135,7 @@ Settings are stored in SQLite and changed with `/set <key> <value>`.
 |---|---|---|---|
 | `max_concurrent_downloads` | `2` | 1–5 | Number of simultaneous downloads. When all slots are busy, new tasks are rejected and the user is asked to resend the link |
 | `max_file_size_mb` | `2000` | 1–2000 | Downloads larger than this are discarded instead of posted |
-| `max_resolution` | `1080` | 360, 480, 720, 1080, 1440, 2160 | Stored and editable, but **not used by the current download flow**: the resolution comes from the per-link picker |
+| `max_resolution` | `1080` | 360, 480, 720, 1080, 1440, 2160 | Upper limit for the resolution picker. Higher resolutions are hidden; if a video has none at or below the limit, its lowest resolution is used |
 
 ## Cookies (for sites that need a login)
 

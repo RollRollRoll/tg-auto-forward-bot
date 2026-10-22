@@ -8,7 +8,7 @@ from telegram.ext import (
 )
 
 from bot.database.connection import get_db
-from bot.database.crud import list_channels
+from bot.database.crud import get_setting, list_channels
 from bot.handlers.filters import admin_only, private_chat_only
 from bot.services.downloader import extract_available_resolutions
 from bot.services.pipeline import download_and_publish
@@ -54,7 +54,10 @@ async def _fetch_and_ask_resolution(update: Update, context: ContextTypes.DEFAUL
         await status_msg.edit_text("No video found at this URL, or the site is not supported.")
         return ConversationHandler.END
 
-    resolutions = heights
+    # 只提供不超过 max_resolution 设置的分辨率；若全部超出，则退回到最低的那一档
+    db = await get_db()
+    max_resolution = int(await get_setting(db, "max_resolution") or "1080")
+    resolutions = [h for h in heights if h <= max_resolution] or [min(heights)]
 
     if len(resolutions) == 1:
         context.user_data["max_resolution"] = resolutions[0]
