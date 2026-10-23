@@ -61,8 +61,7 @@ async def menu_callback_handler(update: Update, context: ContextTypes.DEFAULT_TY
         )
 
     elif action == "tasks":
-        slot_manager = context.bot_data["slot_manager"]
-        text = await format_tasks_text(slot_manager)
+        text = await format_tasks_text(context.bot_data["task_queue"])
         await query.edit_message_text(
             text, reply_markup=_back_keyboard(), parse_mode="HTML",
         )

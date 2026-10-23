@@ -31,7 +31,7 @@ def _make_update(text="", user_id=111, chat_type=ChatType.PRIVATE):
 def _make_context(bot_data=None):
     ctx = MagicMock()
     ctx.user_data = {}
-    ctx.bot_data = bot_data or {"slot_manager": MagicMock()}
+    ctx.bot_data = bot_data or {"task_queue": MagicMock()}
     ctx.bot = AsyncMock()
     ctx.application = MagicMock()
     ctx.application.create_task = MagicMock(
@@ -93,7 +93,7 @@ async def test_cancel_handler():
 @pytest.mark.asyncio
 async def test_start_download_uses_application_create_task_and_clears_state():
     update = _make_update("valid caption")
-    ctx = _make_context({"slot_manager": MagicMock()})
+    ctx = _make_context({"task_queue": MagicMock()})
     ctx.user_data.update(
         {
             "source_url": "https://x.com/u/status/1",
