@@ -1,7 +1,7 @@
 import pytest
 from unittest.mock import AsyncMock, MagicMock
 from telegram.error import BadRequest, Forbidden, TimedOut, NetworkError
-from bot.services.publisher import publish_video
+from bot.services.publisher import UPLOAD_READ_TIMEOUT, publish_video
 
 @pytest.mark.asyncio
 async def test_publish_video_success():
@@ -25,6 +25,19 @@ async def test_publish_video_falls_back_to_document():
     )
     assert result == 99
     bot.send_document.assert_awaited_once()
+
+@pytest.mark.asyncio
+async def test_publish_video_uses_long_read_timeout():
+    # 大文件上传要等 Bot API Server 传完才返回，不能用默认的 5 秒
+    bot = AsyncMock()
+    bot.send_video.side_effect = BadRequest("codec error")
+    bot.send_document.return_value = MagicMock(message_id=99)
+    await publish_video(
+        bot, channel_chat_id=-100123, file_path="/tmp/test.mp4", caption="hello",
+    )
+    assert bot.send_video.call_args.kwargs["read_timeout"] == UPLOAD_READ_TIMEOUT
+    assert bot.send_document.call_args.kwargs["read_timeout"] == UPLOAD_READ_TIMEOUT
+    assert UPLOAD_READ_TIMEOUT >= 600
 
 @pytest.mark.asyncio
 async def test_publish_video_both_fail():
