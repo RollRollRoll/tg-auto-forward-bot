@@ -4,10 +4,13 @@ from telegram import Update, User, Chat, Message
 from telegram.constants import ChatType
 from telegram.ext import ConversationHandler
 
+from bot.services.task_queue import Task
+
 from bot.handlers.conversation import (
     WAITING_CAPTION,
     WAITING_CHANNEL,
     WAITING_RESOLUTION,
+    TaskDraft,
     _start_download,
     cancel_handler,
     caption_handler,
@@ -54,7 +57,7 @@ async def test_caption_handler_too_long():
 async def test_caption_handler_single_channel():
     update = _make_update("valid caption")
     ctx = _make_context()
-    ctx.user_data["source_url"] = "https://x.com/u/status/1"
+    ctx.user_data["draft"] = TaskDraft(source_url="https://x.com/u/status/1")
     channels = [{"chat_id": -100123, "title": "Test"}]
     with patch("bot.handlers.conversation.get_db", new_callable=AsyncMock), \
          patch("bot.handlers.conversation.list_channels", new_callable=AsyncMock, return_value=channels), \
@@ -70,7 +73,7 @@ async def test_caption_handler_single_channel():
 async def test_caption_handler_multi_resolution_shows_keyboard():
     update = _make_update("valid caption")
     ctx = _make_context()
-    ctx.user_data["source_url"] = "https://x.com/u/status/1"
+    ctx.user_data["draft"] = TaskDraft(source_url="https://x.com/u/status/1")
     channels = [{"chat_id": -100123, "title": "Chan A"}, {"chat_id": -100456, "title": "Chan B"}]
     with patch("bot.handlers.conversation.get_db", new_callable=AsyncMock), \
          patch("bot.handlers.conversation.list_channels", new_callable=AsyncMock, return_value=channels), \
@@ -84,7 +87,7 @@ async def test_caption_handler_multi_resolution_shows_keyboard():
 async def test_cancel_handler():
     update = _make_update("/cancel")
     ctx = _make_context()
-    ctx.user_data["source_url"] = "https://x.com/u/status/1"
+    ctx.user_data["draft"] = TaskDraft(source_url="https://x.com/u/status/1")
     result = await cancel_handler(update, ctx)
     assert result == ConversationHandler.END
     assert len(ctx.user_data) == 0
@@ -93,19 +96,23 @@ async def test_cancel_handler():
 @pytest.mark.asyncio
 async def test_start_download_uses_application_create_task_and_clears_state():
     update = _make_update("valid caption")
-    ctx = _make_context({"task_queue": MagicMock()})
-    ctx.user_data.update(
-        {
-            "source_url": "https://x.com/u/status/1",
-            "caption": "<b>ok</b>",
-            "channel_chat_id": -100123,
-        }
+    task_queue = MagicMock()
+    ctx = _make_context({"task_queue": task_queue})
+    ctx.user_data["draft"] = TaskDraft(
+        source_url="https://x.com/u/status/1", caption="<b>ok</b>", channel_chat_id=-100123,
     )
 
-    result = await _start_download(update, ctx)
+    with patch("bot.handlers.conversation.download_and_publish", new=MagicMock()) as dap:
+        result = await _start_download(update, ctx)
 
     assert result == ConversationHandler.END
     update.message.reply_text.assert_awaited_once_with("Task accepted. Downloading video...")
+    # 会话层把整个 Task 交给 pipeline，不再拆成 6 个参数
+    assert dap.call_args.kwargs == {
+        "bot": ctx.bot, "task_queue": task_queue,
+        "task": Task(user_id=111, user_chat_id=111, source_url="https://x.com/u/status/1",
+                     caption="<b>ok</b>", channel_chat_id=-100123, max_resolution=1080),
+    }
     ctx.application.create_task.assert_called_once()
     assert ctx.application.create_task.call_args.kwargs["update"] is update
     assert ctx.user_data == {}
@@ -125,7 +132,7 @@ async def test_resolution_keyboard_respects_max_resolution_setting():
     update = _make_update("valid caption")
     status_msg = _make_status_msg(update)
     ctx = _make_context()
-    ctx.user_data["source_url"] = "https://x.com/u/status/1"
+    ctx.user_data["draft"] = TaskDraft(source_url="https://x.com/u/status/1")
     with patch("bot.handlers.conversation.get_db", new_callable=AsyncMock), \
          patch("bot.handlers.conversation.get_setting", new_callable=AsyncMock, return_value="720"), \
          patch("bot.handlers.conversation.extract_available_resolutions", new_callable=AsyncMock, return_value=[480, 720, 1080, 2160]):
@@ -141,7 +148,7 @@ async def test_resolution_falls_back_to_lowest_when_all_exceed_limit():
     update = _make_update("valid caption")
     status_msg = _make_status_msg(update)
     ctx = _make_context()
-    ctx.user_data["source_url"] = "https://x.com/u/status/1"
+    ctx.user_data["draft"] = TaskDraft(source_url="https://x.com/u/status/1")
     channels = [{"chat_id": -100123, "title": "Test"}]
     with patch("bot.handlers.conversation.get_db", new_callable=AsyncMock), \
          patch("bot.handlers.conversation.list_channels", new_callable=AsyncMock, return_value=channels), \
@@ -151,3 +158,13 @@ async def test_resolution_falls_back_to_lowest_when_all_exceed_limit():
     assert result == ConversationHandler.END
     status_msg.edit_text.assert_awaited_once_with("Only one resolution available: 1080p FHD. Proceeding...")
     ctx.application.create_task.assert_called_once()
+
+
+def test_task_draft_builds_task_with_default_resolution():
+    draft = TaskDraft(source_url="https://x.com/u/status/1")
+    draft.caption = "<b>ok</b>"
+    draft.channel_chat_id = -100123
+    assert draft.to_task(user_id=111, user_chat_id=222) == Task(
+        user_id=111, user_chat_id=222, source_url="https://x.com/u/status/1",
+        caption="<b>ok</b>", channel_chat_id=-100123, max_resolution=1080,
+    )
