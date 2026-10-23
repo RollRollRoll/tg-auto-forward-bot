@@ -9,3 +9,5 @@
 - **post log**：`post_logs` 表中一次发布尝试的记录，状态 pending/publishing/done/failed。
 - **Outcome**：一次 Task 执行的最终结果（Published / TooLarge / NoDiskSpace / SendFailed / Failed），post log 的最终状态和用户通知都由它决定。
 - **Channel**：已配置的发布目标频道。
+- **status message**：每个 Task 在管理员私聊里对应的一条消息，从提交起随 Task 进度原地更新（排队位置、下载进度、转换、上传），直到最终结果。重启恢复的 Task 会另起一条新的 status message。
+- **confirmation card**：TaskDraft 填完后、提交成 Task 之前展示给管理员的摘要（链接、caption、分辨率、Channel），管理员确认后才提交，也可以从这里回去修改某一项或取消。
