@@ -207,3 +207,22 @@ async def test_restore_survives_notification_failure(db):
         assert await restore_pending_tasks(app) == 1
         await asyncio.wait_for(asyncio.gather(*app.tasks), 1)
     assert await list_pending_tasks(db) == []
+
+
+@pytest.mark.asyncio
+async def test_failed_queue_notification_does_not_leak_slot(db):
+    await set_setting(db, "max_concurrent_downloads", "1")
+    slot_mgr = TaskQueue(SqliteTaskStore(db))
+    blocker = await slot_mgr.submit(
+        dict(user_id=1, user_chat_id=1, source_url="https://busy", caption="",
+             channel_chat_id=-1, max_resolution=720), max_slots=1)
+    bot = AsyncMock()
+    bot.send_message.side_effect = RuntimeError("bot was blocked by the user")
+    with pytest.raises(RuntimeError):
+        await _run(bot, slot_mgr)
+
+    async with slot_mgr.slot(blocker):
+        pass
+    # 通知失败的任务不能占着唯一的 slot，pending 记录也要删掉，否则重启后会被重跑
+    assert slot_mgr.get_active_tasks() == []
+    assert await list_pending_tasks(db) == []
