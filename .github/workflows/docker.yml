@@ -1,0 +1,59 @@
+name: Docker Image
+
+on:
+  push:
+    tags: ["v*"]          # 只有推送 v1.2.3 这类 tag 时才构建
+  pull_request:
+    branches: [main]      # PR 只构建、不推送，用来验证 Dockerfile
+  workflow_dispatch:      # 支持在 Actions 页面手动触发
+
+env:
+  IMAGE: ${{ secrets.DOCKERHUB_USERNAME }}/tg-auto-forward-bot
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      # 先跑测试，测试不过就不发布镜像
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -r requirements-dev.txt && pytest
+
+      # QEMU + Buildx：构建 amd64 / arm64 多架构镜像
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+
+      - name: 登录 Docker Hub
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      # 根据触发事件生成镜像 tag
+      - name: 生成镜像标签
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha,prefix=sha-
+            type=raw,value=latest,enable=${{ github.event_name != 'pull_request' }}
+
+      - name: 构建并推送
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
