@@ -5,7 +5,7 @@ import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from bot.database.crud import create_pending_task, list_pending_tasks, set_setting
-from bot.services.task_queue import SqliteTaskStore, TaskQueue
+from bot.services.task_queue import SqliteTaskStore, Task, TaskQueue
 from bot.services.pipeline import download_and_publish, restore_pending_tasks
 
 # 这些测试使用 conftest 里的内存 SQLite（db fixture），pending_tasks / post_logs 都是真实读写
@@ -108,7 +108,7 @@ async def test_queued_task_notifies_position_then_runs(db):
     await set_setting(db, "max_concurrent_downloads", "1")
     slot_mgr = TaskQueue(SqliteTaskStore(db))
     blocker = await slot_mgr.submit(
-        dict(user_id=1, user_chat_id=1, source_url="https://busy", caption="",
+        Task(user_id=1, user_chat_id=1, source_url="https://busy", caption="",
              channel_chat_id=-1, max_resolution=720), max_slots=1)
     bot = AsyncMock()
     with ExitStack() as stack:
@@ -128,7 +128,7 @@ async def test_close_keeps_queued_and_late_tasks_for_restart(db):
     await set_setting(db, "max_concurrent_downloads", "1")
     slot_mgr = TaskQueue(SqliteTaskStore(db))
     blocker = await slot_mgr.submit(
-        dict(user_id=1, user_chat_id=1, source_url="https://busy", caption="",
+        Task(user_id=1, user_chat_id=1, source_url="https://busy", caption="",
              channel_chat_id=-1, max_resolution=720), max_slots=1)
     bot = AsyncMock()
     download = AsyncMock(return_value=_RESULT)
@@ -222,7 +222,7 @@ async def test_failed_queue_notification_does_not_leak_slot(db):
     await set_setting(db, "max_concurrent_downloads", "1")
     slot_mgr = TaskQueue(SqliteTaskStore(db))
     blocker = await slot_mgr.submit(
-        dict(user_id=1, user_chat_id=1, source_url="https://busy", caption="",
+        Task(user_id=1, user_chat_id=1, source_url="https://busy", caption="",
              channel_chat_id=-1, max_resolution=720), max_slots=1)
     bot = AsyncMock()
     bot.send_message.side_effect = RuntimeError("bot was blocked by the user")
