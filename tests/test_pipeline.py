@@ -124,13 +124,32 @@ async def test_queued_task_notifies_position_then_runs(db):
 
 
 @pytest.mark.asyncio
-async def test_task_submitted_after_close_tells_user_it_is_saved(db):
+async def test_close_keeps_queued_and_late_tasks_for_restart(db):
+    await set_setting(db, "max_concurrent_downloads", "1")
     slot_mgr = TaskQueue(SqliteTaskStore(db))
-    slot_mgr.close()
+    blocker = await slot_mgr.submit(
+        dict(user_id=1, user_chat_id=1, source_url="https://busy", caption="",
+             channel_chat_id=-1, max_resolution=720), max_slots=1)
     bot = AsyncMock()
-    await _run(bot, slot_mgr)
-    assert "saved" in _texts(bot)[-1]
-    assert [r["status"] for r in await list_pending_tasks(db)] == ["queued"]
+    download = AsyncMock(return_value=_RESULT)
+    with ExitStack() as stack:
+        for p in _patches(download=download):
+            stack.enter_context(p)
+        queued = asyncio.create_task(_run(bot, slot_mgr, url="https://queued"))
+        await _until(lambda: len(slot_mgr.get_queued_tasks()) == 1)
+        slot_mgr.close()
+        await asyncio.wait_for(queued, 1)
+        await _run(bot, slot_mgr, url="https://late")
+        # 正在运行的 blocker 正常结束，记录删除
+        async with slot_mgr.slot(blocker):
+            pass
+
+    download.assert_not_awaited()
+    assert "saved" in _texts(bot)[-1] and "saved" in _texts(bot)[-2]
+    rows = await list_pending_tasks(db)
+    assert [(r["source_url"], r["status"]) for r in rows] == [
+        ("https://queued", "queued"), ("https://late", "queued"),
+    ]
 
 
 def _fake_application(slot_mgr):
@@ -177,35 +196,24 @@ async def test_restore_resumes_queued_tasks_in_order(db):
 
 
 @pytest.mark.asyncio
-async def test_restore_does_not_rerun_interrupted_running_task(db):
-    await _add_pending(db, "https://was-running", running=True)
-    slot_mgr = TaskQueue(SqliteTaskStore(db))
-    app = _fake_application(slot_mgr)
-    download = AsyncMock(return_value=_RESULT)
-    with ExitStack() as stack:
-        for p in _patches(download=download):
-            stack.enter_context(p)
-        assert await restore_pending_tasks(app) == 0
-
-    download.assert_not_awaited()
-    text = app.bot.send_message.call_args.kwargs["text"]
-    assert "interrupted" in text and "https://was-running" in text
-    assert await list_pending_tasks(db) == []
-
-
-@pytest.mark.asyncio
-async def test_restore_survives_notification_failure(db):
+async def test_restore_drops_interrupted_task_even_if_notification_fails(db):
     await _add_pending(db, "https://was-running", running=True)
     await _add_pending(db, "https://queued")
     slot_mgr = TaskQueue(SqliteTaskStore(db))
     app = _fake_application(slot_mgr)
     # 第一条通知（中断提醒）失败，后面的任务仍要恢复
     app.bot.send_message.side_effect = [RuntimeError("blocked"), None, None]
+    download = AsyncMock(return_value=_RESULT)
     with ExitStack() as stack:
-        for p in _patches():
+        for p in _patches(download=download):
             stack.enter_context(p)
         assert await restore_pending_tasks(app) == 1
         await asyncio.wait_for(asyncio.gather(*app.tasks), 1)
+
+    first_text = app.bot.send_message.call_args_list[0].kwargs["text"]
+    assert "interrupted" in first_text and "https://was-running" in first_text
+    # 中断任务不重跑，避免重复发布
+    assert [c.args[0] for c in download.await_args_list] == ["https://queued"]
     assert await list_pending_tasks(db) == []
 
 
