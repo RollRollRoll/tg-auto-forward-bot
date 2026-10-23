@@ -8,7 +8,7 @@ from bot.database.connection import get_db
 from bot.database.crud import create_post_log, get_setting, update_post_log_status
 from bot.services.downloader import check_disk_space, download_video
 from bot.services.publisher import publish_video
-from bot.services.task_queue import Ticket, TaskQueue
+from bot.services.task_queue import Task, Ticket, TaskQueue
 
 logger = logging.getLogger(__name__)
 
@@ -29,7 +29,7 @@ async def download_and_publish(
 ) -> None:
     db = await get_db()
     max_concurrent, max_file_size = await _read_limits(db)
-    task = dict(
+    task = Task(
         user_id=user_id, user_chat_id=user_chat_id, source_url=source_url,
         caption=caption, channel_chat_id=channel_chat_id, max_resolution=max_resolution,
     )
@@ -51,28 +51,28 @@ async def restore_pending_tasks(application) -> int:
     max_concurrent, max_file_size = await _read_limits(db)
 
     resumed, interrupted = await task_queue.restore(max_slots=max_concurrent)
-    for row in interrupted:
+    for task in interrupted:
         try:
             await bot.send_message(
-                chat_id=row["user_chat_id"],
-                text=f"Your task was interrupted by a bot restart and could not be resumed. Please resend the link:\n{row['source_url']}",
+                chat_id=task.user_chat_id,
+                text=f"Your task was interrupted by a bot restart and could not be resumed. Please resend the link:\n{task.source_url}",
             )
         except Exception:
-            logger.warning("Failed to notify user %d about interrupted task %d", row["user_chat_id"], row["id"])
+            logger.warning("Failed to notify user %d about interrupted task %s", task.user_chat_id, task.source_url)
 
-    for row, ticket in resumed:
+    for task, ticket in resumed:
         application.create_task(_process(
-            bot=bot, db=db, task_queue=task_queue, ticket=ticket, task=row,
+            bot=bot, db=db, task_queue=task_queue, ticket=ticket, task=task,
             max_concurrent=max_concurrent, max_file_size=max_file_size, restored=True,
         ))
     return len(resumed)
 
 
 async def _process(
-    *, bot: Bot, db, task_queue: TaskQueue, ticket: Ticket, task: dict,
+    *, bot: Bot, db, task_queue: TaskQueue, ticket: Ticket, task: Task,
     max_concurrent: int, max_file_size: int, restored: bool = False,
 ) -> None:
-    user_chat_id = task["user_chat_id"]
+    user_chat_id = task.user_chat_id
 
     async def notify_queued(t: Ticket) -> None:
         prefix = "Bot restarted. " if restored else f"All {max_concurrent} download slots are busy. "
@@ -88,20 +88,18 @@ async def _process(
             await bot.send_message(chat_id=user_chat_id, text=_SAVED_FOR_RESTART)
             return
         if restored and ticket.position == 0:
-            await bot.send_message(chat_id=user_chat_id, text=f"Bot restarted. Resuming your task:\n{task['source_url']}")
+            await bot.send_message(chat_id=user_chat_id, text=f"Bot restarted. Resuming your task:\n{task.source_url}")
         await _run_task(
-            bot=bot, db=db, task_queue=task_queue, task_id=ticket.task_id,
-            user_chat_id=user_chat_id, user_id=task["user_id"], source_url=task["source_url"],
-            caption=task["caption"], channel_chat_id=task["channel_chat_id"],
-            max_resolution=task["max_resolution"], max_concurrent=max_concurrent, max_file_size=max_file_size,
+            bot=bot, db=db, task_queue=task_queue, task_id=ticket.task_id, task=task,
+            max_concurrent=max_concurrent, max_file_size=max_file_size,
         )
 
 
 async def _run_task(
-    *, bot: Bot, db, task_queue: TaskQueue, task_id: int,
-    user_chat_id: int, user_id: int, source_url: str, caption: str,
-    channel_chat_id: int, max_resolution: int, max_concurrent: int, max_file_size: int,
+    *, bot: Bot, db, task_queue: TaskQueue, task_id: int, task: Task,
+    max_concurrent: int, max_file_size: int,
 ) -> None:
+    user_chat_id = task.user_chat_id
     # 拿到槽位后再检查磁盘：排队期间剩余空间可能已经变化
     has_space, free_mb = check_disk_space(max_concurrent, max_file_size)
     if not has_space:
@@ -121,11 +119,11 @@ async def _run_task(
     tmp_dir = None
     try:
         log_id = await create_post_log(
-            db, admin_user_id=user_id, source_url=source_url,
-            channel_chat_id=channel_chat_id, caption=caption,
+            db, admin_user_id=task.user_id, source_url=task.source_url,
+            channel_chat_id=task.channel_chat_id, caption=task.caption,
         )
 
-        result = await download_video(source_url, max_resolution=max_resolution, progress_callback=_progress_hook)
+        result = await download_video(task.source_url, max_resolution=task.max_resolution, progress_callback=_progress_hook)
         tmp_dir = result["tmp_dir"]
 
         if result["file_size_mb"] > max_file_size:
@@ -136,8 +134,8 @@ async def _run_task(
         task_queue.update_progress(task_id, 100.0, "publishing")
         await update_post_log_status(db, log_id, status="publishing")
         message_id = await publish_video(
-            bot, channel_chat_id=channel_chat_id, file_path=result["file_path"],
-            caption=caption, duration=result.get("duration"), width=result.get("width"), height=result.get("height"),
+            bot, channel_chat_id=task.channel_chat_id, file_path=result["file_path"],
+            caption=task.caption, duration=result.get("duration"), width=result.get("width"), height=result.get("height"),
         )
 
         if message_id:
@@ -148,7 +146,7 @@ async def _run_task(
             await bot.send_message(chat_id=user_chat_id, text="Send failed, please check Bot permissions.")
 
     except Exception as e:
-        logger.exception("Pipeline error for %s", source_url)
+        logger.exception("Pipeline error for %s", task.source_url)
         if log_id:
             await update_post_log_status(db, log_id, status="failed", error_message=str(e))
         await bot.send_message(chat_id=user_chat_id, text=f"Download failed: {e}")

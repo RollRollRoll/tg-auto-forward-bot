@@ -2,11 +2,27 @@ from __future__ import annotations
 import asyncio
 import time
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass, fields
 
 from bot.database.crud import (
     create_pending_task, delete_pending_task, list_pending_tasks, mark_pending_task_running,
 )
+
+
+@dataclass(frozen=True)
+class Task:
+    """一次"把某个链接下载并发布到某个 Channel"的请求。"""
+    user_id: int
+    user_chat_id: int
+    source_url: str
+    caption: str
+    channel_chat_id: int
+    max_resolution: int
+
+    @classmethod
+    def from_row(cls, row: dict) -> Task:
+        # pending_tasks 行里还有 id、status，只取 Task 自己的字段
+        return cls(**{f.name: row[f.name] for f in fields(cls)})
 
 
 class InMemoryTaskStore:
@@ -16,9 +32,9 @@ class InMemoryTaskStore:
         self._rows: dict[int, dict] = {}
         self._next_id = 0
 
-    async def create(self, task: dict) -> int:
+    async def create(self, task: Task) -> int:
         self._next_id += 1
-        self._rows[self._next_id] = {"id": self._next_id, **task, "status": "queued"}
+        self._rows[self._next_id] = {"id": self._next_id, **asdict(task), "status": "queued"}
         return self._next_id
 
     async def list(self) -> list[dict]:
@@ -37,12 +53,8 @@ class SqliteTaskStore:
     def __init__(self, db):
         self._db = db
 
-    async def create(self, task: dict) -> int:
-        return await create_pending_task(
-            self._db, user_id=task["user_id"], user_chat_id=task["user_chat_id"],
-            source_url=task["source_url"], caption=task["caption"],
-            channel_chat_id=task["channel_chat_id"], max_resolution=task["max_resolution"],
-        )
+    async def create(self, task: Task) -> int:
+        return await create_pending_task(self._db, **asdict(task))
 
     async def list(self) -> list[dict]:
         return await list_pending_tasks(self._db)
@@ -73,28 +85,29 @@ class TaskQueue:
         self._closed = False
         self._lock = asyncio.Lock()
 
-    async def submit(self, task: dict, *, max_slots: int) -> Ticket:
+    async def submit(self, task: Task, *, max_slots: int) -> Ticket:
         task_id = await self._store.create(task)
         return await self._register(task_id, task, max_slots)
 
-    async def restore(self, *, max_slots: int) -> tuple[list[tuple[dict, Ticket]], list[dict]]:
+    async def restore(self, *, max_slots: int) -> tuple[list[tuple[Task, Ticket]], list[Task]]:
         """启动后恢复上次退出时留下的 pending task。
 
-        返回 (待恢复的 (记录, ticket) 列表, 被丢弃的中断任务记录)。
+        返回 (待恢复的 (Task, ticket) 列表, 被丢弃的中断 Task)。
         status=running 的任务无法确认是否已发到频道，为避免重复发布直接删除，由调用方通知用户重发。
         """
-        resumed: list[tuple[dict, Ticket]] = []
-        interrupted: list[dict] = []
+        resumed: list[tuple[Task, Ticket]] = []
+        interrupted: list[Task] = []
         for row in await self._store.list():
+            task = Task.from_row(row)
             if row["status"] == "running":
                 await self._store.delete(row["id"])
-                interrupted.append(row)
+                interrupted.append(task)
                 continue
             # 按入队顺序依次登记，保证恢复后的排队顺序与重启前一致
-            resumed.append((row, await self._register(row["id"], row, max_slots)))
+            resumed.append((task, await self._register(row["id"], task, max_slots)))
         return resumed, interrupted
 
-    async def _register(self, task_id: int, task: dict, max_slots: int) -> Ticket:
+    async def _register(self, task_id: int, task: Task, max_slots: int) -> Ticket:
         async with self._lock:
             if self._closed:
                 # 已关闭：记录已落库，留到重启后恢复
@@ -103,7 +116,7 @@ class TaskQueue:
             self._max_slots = max_slots
             self._promote()
             info = {
-                "url": task["source_url"], "user_id": task["user_id"],
+                "url": task.source_url, "user_id": task.user_id,
                 "start_time": time.time(), "progress": 0.0,
                 # 已拿到 slot、还没开始下载
                 "status": "starting",

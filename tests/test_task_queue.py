@@ -1,13 +1,13 @@
 import asyncio
 import pytest
 
-from bot.services.task_queue import InMemoryTaskStore, TaskQueue
+from bot.services.task_queue import InMemoryTaskStore, Task, TaskQueue
 
 # 使用内存 store，行为完全确定，不依赖 SQLite 和轮询
 
 
 def _task(url="https://a"):
-    return dict(user_id=1, user_chat_id=1, source_url=url, caption="c",
+    return Task(user_id=1, user_chat_id=1, source_url=url, caption="c",
                 channel_chat_id=-100, max_resolution=720)
 
 
@@ -101,11 +101,11 @@ async def test_restore_requeues_queued_in_order_and_drops_interrupted_running():
     queue = TaskQueue(store)
     resumed, interrupted = await queue.restore(max_slots=1)
 
-    assert [(r["source_url"], t.position) for r, t in resumed] == [
+    assert [(task.source_url, t.position) for task, t in resumed] == [
         ("https://a", 0), ("https://b", 1), ("https://c", 2),
     ]
-    assert resumed[0][0]["max_resolution"] == 720
-    assert [r["source_url"] for r in interrupted] == ["https://was-running"]
+    assert resumed[0][0] == _task("https://a")
+    assert interrupted == [_task("https://was-running")]
     assert [r["source_url"] for r in await store.list()] == ["https://a", "https://b", "https://c"]
 
 
