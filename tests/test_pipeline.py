@@ -6,7 +6,10 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 from bot.database.crud import create_pending_task, list_pending_tasks, set_setting
 from bot.services.task_queue import SqliteTaskStore, Task, TaskQueue
-from bot.services.pipeline import download_and_publish, restore_pending_tasks
+from bot.services.pipeline import (
+    Failed, NoDiskSpace, Published, SendFailed, TooLarge,
+    download_and_publish, execute_task, outcome_message, restore_pending_tasks,
+)
 
 # 这些测试使用 conftest 里的内存 SQLite（db fixture），pending_tasks / post_logs 都是真实读写
 
@@ -62,46 +65,6 @@ async def test_pipeline_success_path(db):
     cursor = await db.execute("SELECT status, message_id FROM post_logs")
     assert [tuple(r) for r in await cursor.fetchall()] == [("done", 999)]
 
-
-@pytest.mark.asyncio
-async def test_pipeline_rejects_when_no_disk_space(db):
-    slot_mgr = TaskQueue(SqliteTaskStore(db))
-    bot = AsyncMock()
-    with ExitStack() as stack:
-        for p in _patches(disk_ok=False):
-            stack.enter_context(p)
-        await _run(bot, slot_mgr)
-    assert "disk" in _texts(bot)[-1].lower()
-    assert slot_mgr.get_active_tasks() == []
-    assert await list_pending_tasks(db) == []
-
-
-@pytest.mark.asyncio
-async def test_pipeline_rejects_oversized_file(db):
-    await set_setting(db, "max_file_size_mb", "50")
-    slot_mgr = TaskQueue(SqliteTaskStore(db))
-    bot = AsyncMock()
-    big = AsyncMock(return_value={**_RESULT, "file_size_mb": 100.0})
-    with ExitStack() as stack:
-        for p in _patches(download=big):
-            stack.enter_context(p)
-        await _run(bot, slot_mgr)
-    assert "too large" in _texts(bot)[-1].lower()
-    assert await list_pending_tasks(db) == []
-
-
-@pytest.mark.asyncio
-async def test_pipeline_download_failure(db):
-    slot_mgr = TaskQueue(SqliteTaskStore(db))
-    bot = AsyncMock()
-    failing = AsyncMock(side_effect=RuntimeError("yt-dlp error"))
-    with ExitStack() as stack:
-        for p in _patches(download=failing):
-            stack.enter_context(p)
-        await _run(bot, slot_mgr)
-    assert "failed" in _texts(bot)[-1].lower()
-    assert slot_mgr.get_active_tasks() == []
-    assert await list_pending_tasks(db) == []
 
 @pytest.mark.asyncio
 async def test_queued_task_notifies_position_then_runs(db):
@@ -255,3 +218,86 @@ async def test_failed_success_notification_keeps_post_log_done(db):
     assert [tuple(r) for r in await cursor.fetchall()] == [("done", 999)]
     assert slot_mgr.get_active_tasks() == []
     assert await list_pending_tasks(db) == []
+
+
+async def _post_logs(db):
+    cursor = await db.execute("SELECT status, message_id, error_message FROM post_logs")
+    return [tuple(r) for r in await cursor.fetchall()]
+
+
+def _execute(db, *, max_file_size=2000):
+    task = Task(user_id=111, user_chat_id=111, source_url="https://x.com/u/status/1",
+                caption="test", channel_chat_id=-100123, max_resolution=720)
+    return execute_task(
+        bot=AsyncMock(), db=db, task_queue=TaskQueue(SqliteTaskStore(db)), task_id=1, task=task,
+        max_concurrent=2, max_file_size=max_file_size,
+    )
+
+
+@pytest.mark.asyncio
+async def test_execute_task_rejects_oversized_file(db):
+    big = AsyncMock(return_value={**_RESULT, "file_size_mb": 100.0})
+    with ExitStack() as stack:
+        for p in _patches(download=big):
+            stack.enter_context(p)
+        outcome = await _execute(db, max_file_size=50)
+    assert outcome == TooLarge(size_mb=100.0, limit_mb=50)
+    assert await _post_logs(db) == [("failed", None, "File too large: 100.0 MB")]
+
+
+@pytest.mark.asyncio
+async def test_execute_task_publishes_and_records_done(db):
+    with ExitStack() as stack:
+        for p in _patches(publish_id=999):
+            stack.enter_context(p)
+        outcome = await _execute(db)
+    assert outcome == Published(message_id=999)
+    assert await _post_logs(db) == [("done", 999, None)]
+
+
+@pytest.mark.asyncio
+async def test_execute_task_without_disk_space_skips_post_log(db):
+    download = AsyncMock(return_value=_RESULT)
+    with ExitStack() as stack:
+        for p in _patches(disk_ok=False, download=download):
+            stack.enter_context(p)
+        outcome = await _execute(db)
+    assert outcome == NoDiskSpace()
+    download.assert_not_awaited()
+    assert await _post_logs(db) == []
+
+
+@pytest.mark.asyncio
+async def test_execute_task_reports_channel_send_failure(db):
+    with ExitStack() as stack:
+        for p in _patches(publish_id=None):
+            stack.enter_context(p)
+        outcome = await _execute(db)
+    assert outcome == SendFailed()
+    assert await _post_logs(db) == [("failed", None, "Failed to send to channel")]
+
+
+@pytest.mark.asyncio
+async def test_execute_task_turns_exceptions_into_failed(db):
+    failing = AsyncMock(side_effect=RuntimeError("yt-dlp error"))
+    with ExitStack() as stack:
+        for p in _patches(download=failing):
+            stack.enter_context(p)
+        outcome = await _execute(db)
+    assert outcome == Failed(error="yt-dlp error")
+    assert await _post_logs(db) == [("failed", None, "yt-dlp error")]
+
+
+def _outcome_cases():
+    return [
+        (Published(message_id=42), "Published successfully! (message #42)"),
+        (TooLarge(size_mb=100.04, limit_mb=50), "Video too large (100.0 MB), exceeds limit (50 MB)."),
+        (NoDiskSpace(), "Insufficient disk space, please try again later."),
+        (SendFailed(), "Send failed, please check Bot permissions."),
+        (Failed(error="yt-dlp error"), "Download failed: yt-dlp error"),
+    ]
+
+
+@pytest.mark.parametrize("outcome,expected", _outcome_cases())
+def test_outcome_message_keeps_existing_wording(outcome, expected):
+    assert outcome_message(outcome) == expected

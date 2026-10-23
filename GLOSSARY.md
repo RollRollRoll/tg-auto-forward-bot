@@ -6,4 +6,5 @@
 - **TaskQueue**：负责 Task 排队、持久化与 slot 生命周期的模块，不负责下载/发布，不依赖 Telegram。保证"重启不丢任务、不重复发布"。
 - **ticket**：`TaskQueue.submit()` 返回的凭据，带 task_id 与排队位置（0 表示直接拿到 slot）。
 - **post log**：`post_logs` 表中一次发布尝试的记录，状态 pending/publishing/done/failed。
+- **Outcome**：一次 Task 执行的最终结果（Published / TooLarge / NoDiskSpace / SendFailed / Failed），post log 的最终状态和用户通知都由它决定。
 - **Channel**：已配置的发布目标频道。

@@ -1,6 +1,7 @@
 from __future__ import annotations
 import logging
 import shutil
+from dataclasses import dataclass
 
 from telegram import Bot
 
@@ -14,6 +15,52 @@ logger = logging.getLogger(__name__)
 
 
 _SAVED_FOR_RESTART = "Bot is restarting. Your task is saved and will start automatically after the restart."
+
+
+@dataclass(frozen=True)
+class Published:
+    message_id: int
+
+
+@dataclass(frozen=True)
+class TooLarge:
+    size_mb: float
+    limit_mb: int
+
+
+@dataclass(frozen=True)
+class NoDiskSpace:
+    pass
+
+
+@dataclass(frozen=True)
+class SendFailed:
+    pass
+
+
+@dataclass(frozen=True)
+class Failed:
+    error: str
+
+
+# 一次 Task 执行的最终结果，post log 的最终状态和用户通知都由它决定
+Outcome = Published | TooLarge | NoDiskSpace | SendFailed | Failed
+
+
+def outcome_message(outcome: Outcome) -> str:
+    """把执行结果转成发给用户的通知文案。"""
+    match outcome:
+        case Published(message_id):
+            return f"Published successfully! (message #{message_id})"
+        case TooLarge(size_mb, limit_mb):
+            return f"Video too large ({size_mb:.1f} MB), exceeds limit ({limit_mb} MB)."
+        case NoDiskSpace():
+            return "Insufficient disk space, please try again later."
+        case SendFailed():
+            return "Send failed, please check Bot permissions."
+        case Failed(error):
+            return f"Download failed: {error}"
+    raise TypeError(f"Unknown outcome: {outcome!r}")
 
 
 async def _read_limits(db) -> tuple[int, int]:
@@ -89,10 +136,11 @@ async def _process(
             return
         if restored and ticket.position == 0:
             await bot.send_message(chat_id=user_chat_id, text=f"Bot restarted. Resuming your task:\n{task.source_url}")
-        await _run_task(
+        outcome = await execute_task(
             bot=bot, db=db, task_queue=task_queue, task_id=ticket.task_id, task=task,
             max_concurrent=max_concurrent, max_file_size=max_file_size,
         )
+        await _notify(bot, user_chat_id, outcome_message(outcome))
 
 
 async def _notify(bot: Bot, chat_id: int, text: str) -> None:
@@ -103,16 +151,15 @@ async def _notify(bot: Bot, chat_id: int, text: str) -> None:
         logger.warning("Failed to notify user %d: %s", chat_id, text)
 
 
-async def _run_task(
+async def execute_task(
     *, bot: Bot, db, task_queue: TaskQueue, task_id: int, task: Task,
     max_concurrent: int, max_file_size: int,
-) -> None:
-    user_chat_id = task.user_chat_id
+) -> Outcome:
+    """下载并发布一个 Task，过程中更新 post log，返回最终结果。不发用户通知，也不向外抛异常。"""
     # 拿到槽位后再检查磁盘：排队期间剩余空间可能已经变化
-    has_space, free_mb = check_disk_space(max_concurrent, max_file_size)
+    has_space, _ = check_disk_space(max_concurrent, max_file_size)
     if not has_space:
-        await _notify(bot, user_chat_id, "Insufficient disk space, please try again later.")
-        return
+        return NoDiskSpace()
 
     def _progress_hook(d: dict) -> None:
         if d.get("status") == "downloading":
@@ -136,8 +183,7 @@ async def _run_task(
 
         if result["file_size_mb"] > max_file_size:
             await update_post_log_status(db, log_id, status="failed", error_message=f"File too large: {result['file_size_mb']:.1f} MB")
-            await _notify(bot, user_chat_id, f"Video too large ({result['file_size_mb']:.1f} MB), exceeds limit ({max_file_size} MB).")
-            return
+            return TooLarge(size_mb=result["file_size_mb"], limit_mb=max_file_size)
 
         task_queue.update_progress(task_id, 100.0, "publishing")
         await update_post_log_status(db, log_id, status="publishing")
@@ -148,16 +194,15 @@ async def _run_task(
 
         if message_id:
             await update_post_log_status(db, log_id, status="done", message_id=message_id)
-            await _notify(bot, user_chat_id, f"Published successfully! (message #{message_id})")
-        else:
-            await update_post_log_status(db, log_id, status="failed", error_message="Failed to send to channel")
-            await _notify(bot, user_chat_id, "Send failed, please check Bot permissions.")
+            return Published(message_id=message_id)
+        await update_post_log_status(db, log_id, status="failed", error_message="Failed to send to channel")
+        return SendFailed()
 
     except Exception as e:
         logger.exception("Pipeline error for %s", task.source_url)
         if log_id:
             await update_post_log_status(db, log_id, status="failed", error_message=str(e))
-        await _notify(bot, user_chat_id, f"Download failed: {e}")
+        return Failed(error=str(e))
     finally:
         # 槽位由外层 _process 的 slot() 统一释放
         if tmp_dir:
