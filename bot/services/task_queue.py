@@ -103,9 +103,10 @@ class TaskQueue:
             self._max_slots = max_slots
             self._promote()
             info = {
-                "url": task["source_url"], "source_url": task["source_url"],
-                "user_id": task["user_id"], "start_time": time.time(),
-                "progress": 0.0, "status": "waiting",
+                "url": task["source_url"], "user_id": task["user_id"],
+                "start_time": time.time(), "progress": 0.0,
+                # 已拿到 slot、还没开始下载
+                "status": "starting",
             }
             # 队列里还有人时不能插队，即使恰好有空闲槽位
             if not self._queue and len(self._tasks) < max_slots:
@@ -173,7 +174,7 @@ class TaskQueue:
             if waiter is None or waiter.done():
                 # 等待方已被取消，跳过，不占用槽位
                 continue
-            info["status"] = "waiting"
+            info["status"] = "starting"
             info["start_time"] = time.time()
             self._tasks[task_id] = info
             waiter.set_result(True)
@@ -184,15 +185,12 @@ class TaskQueue:
             self._tasks[task_id]["status"] = status
 
     def get_active_tasks(self) -> list[dict]:
-        now = time.time()
-        return [
-            {"task_id": tid, "elapsed": now - t["start_time"], **t}
-            for tid, t in self._tasks.items()
-        ]
+        return self._snapshot(self._tasks)
 
     def get_queued_tasks(self) -> list[dict]:
+        return [{**t, "position": pos} for pos, t in enumerate(self._snapshot(self._queue), start=1)]
+
+    @staticmethod
+    def _snapshot(tasks: dict[int, dict]) -> list[dict]:
         now = time.time()
-        return [
-            {"task_id": tid, "position": pos, "elapsed": now - t["start_time"], **t}
-            for pos, (tid, t) in enumerate(self._queue.items(), start=1)
-        ]
+        return [{"task_id": tid, "elapsed": now - t["start_time"], **t} for tid, t in tasks.items()]

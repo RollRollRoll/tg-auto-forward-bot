@@ -179,7 +179,7 @@ def _format_elapsed(seconds: float) -> str:
 
 
 _STATUS_LABELS = {
-    "waiting": "Waiting",
+    "starting": "Starting",
     "downloading": "Downloading",
     "processing": "Processing",
     "publishing": "Publishing",
