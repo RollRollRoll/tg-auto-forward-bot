@@ -22,6 +22,8 @@ from bot.services.pipeline import restore_pending_tasks
 from bot.services.task_queue import SqliteTaskStore, TaskQueue
 
 logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
+# httpx 的 INFO 日志会打印完整请求 URL，其中包含 bot token，调高级别避免泄露
+logging.getLogger("httpx").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
 

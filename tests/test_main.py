@@ -5,6 +5,12 @@ import pytest
 from bot.main import BotApplication, main, post_stop
 
 
+def test_httpx_info_logs_are_silenced():
+    # httpx 的 INFO 日志会带出含 token 的 URL
+    import logging
+    assert logging.getLogger("httpx").getEffectiveLevel() >= logging.WARNING
+
+
 @pytest.mark.asyncio
 async def test_post_stop_closes_db():
     application = MagicMock()
