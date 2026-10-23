@@ -1,5 +1,7 @@
 # Telegram X Video Forward Bot - Design Spec
 
+> **Revision 2026-10-22:** download tasks are no longer rejected when all slots are busy. They wait in a FIFO queue persisted in the `pending_tasks` table and resume after a restart. Affected sections: background task steps, `pending_tasks`, Error Handling, Concurrency and Disk Safety. Other sections still describe the original design and may be outdated in details (e.g. multi-platform support, resolution picker).
+
 ## Overview
 
 A Telegram Bot that receives Twitter (X) video links from authorized users via private chat, downloads the video using yt-dlp, and publishes it with user-provided rich text caption to a designated Telegram Channel. Uses a Local Bot API Server to support uploads up to 2000MB.
@@ -106,14 +108,14 @@ task = asyncio.create_task(
 ```
 
 The background task:
-1. Acquires a download slot via `DownloadSlotManager.try_acquire_slot()`
-   - If no slot: sends "Server busy..." message to user, task exits
-2. Checks disk space
+1. Saves the task to `pending_tasks`, then registers it with `DownloadSlotManager.enqueue()`
+   - If no slot: tells the user their queue position and waits in `wait_for_slot()`
+2. Checks disk space (after the slot is acquired, since the queue wait can be long)
 3. Downloads video with yt-dlp
 4. Post-processes (faststart, codec check)
 5. Publishes to channel via `bot.send_video()`
 6. Sends success/failure notification to user via `bot.send_message()`
-7. Releases download slot in `finally`
+7. Releases download slot and deletes the `pending_tasks` row in `finally`
 
 **Why this split matters:** `python-telegram-bot` processes updates sequentially through handlers. If download (which can take minutes) ran inside a handler via `await`, it would block all other updates — no other admin could even start a conversation. By ending the conversation first and spawning a background task, the handler returns immediately, unblocking the update queue. Multiple background tasks run concurrently via the event loop, achieving the parallel download goal.
 
@@ -178,6 +180,24 @@ The `/set` command validates keys against this whitelist and values against thei
 | error_message | TEXT | Error details if status is `failed` (nullable) |
 | created_at | TIMESTAMP | Record creation time |
 | updated_at | TIMESTAMP | Last status update time |
+
+On startup, rows still in `downloading` / `publishing` are marked `failed` with `Interrupted by restart`.
+
+### pending_tasks
+
+Tasks that were submitted but have not finished. Used to restore the queue after a restart.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| id | INTEGER PK | Auto-increment; also used as the task ID in `DownloadSlotManager` |
+| user_id | BIGINT | Submitting admin |
+| user_chat_id | BIGINT | Private chat to notify |
+| source_url | TEXT | Video link |
+| caption | TEXT | Sanitized caption |
+| channel_chat_id | BIGINT | Target Channel |
+| max_resolution | INTEGER | Resolution chosen in the conversation |
+| status | TEXT | `queued` / `running` |
+| created_at | TIMESTAMP | Submission time |
 
 ## Bot Commands
 
@@ -332,7 +352,9 @@ Documented in `/start` help message with supported tag list and character limit.
 | Channel send failure | "Send failed, please check Bot permissions." (Should be rare — channel validated on add) |
 | Caption too long | "Caption too long (X/1024 chars). Please shorten and resend." (stays in WAITING_CAPTION) |
 | Insufficient disk space | "Insufficient disk space, please try again later" |
-| Concurrency limit reached | "Server busy (X/Y slots in use). Please resend your link to try again." (conversation ends) |
+| Concurrency limit reached | "Your task is queued at position N and will start automatically." |
+| Bot stopped while task is queued | "Bot is restarting. Your task is saved..." (resumed after restart) |
+| Bot stopped while task is downloading | After restart: "Your task was interrupted by a bot restart..." (not retried, see below) |
 | Non-streamable video | Falls back to `send_document()` with notice to user |
 | Network timeout | "Network timeout, please try again later" |
 | Unsupported HTML tags in caption | Strip unsupported tags silently, send with clean HTML |
@@ -341,35 +363,18 @@ Documented in `/start` help message with supported tag list and character limit.
 
 **Per-user conversation:** ConversationHandler enforces one active conversation per user. But since the conversation ends before download starts, a user can start a new conversation while their previous download is still running in the background.
 
-**Global concurrency limit:** A `DownloadSlotManager` guards the background download tasks. The slot is acquired as the first step inside the background `asyncio.Task` (not inside the conversation handler):
+**Global concurrency limit and queue:** A `DownloadSlotManager` (`bot/services/downloader.py`) holds the running tasks and a FIFO queue. The slot is acquired inside the background `asyncio.Task`, not inside the conversation handler.
 
-```python
-# In downloader service (singleton instance)
-class DownloadSlotManager:
-    def __init__(self):
-        self._active_downloads: int = 0
-        self._lock = asyncio.Lock()
+- `enqueue(max_slots, task_id=...)` takes a free slot (position 0) or appends the task to the queue (position 1, 2, ...). A new task never jumps ahead of queued ones, even if a slot happens to be free.
+- `wait_for_slot(task_id)` returns `True` when the task gets a slot, `False` if the manager was closed.
+- `release_slot(task_id)` frees the slot and promotes the next queued task. Every `enqueue` re-reads `max_concurrent_downloads`, so raising it releases queued tasks on the next submission; lowering it does not stop running tasks.
 
-    async def try_acquire_slot(self, max_slots: int) -> bool:
-        async with self._lock:
-            if self._active_downloads >= max_slots:
-                return False
-            self._active_downloads += 1
-            return True
+**Persistence and restart:** every task is written to `pending_tasks` before it is enqueued, marked `running` when it gets a slot, and deleted when it finishes.
 
-    async def release_slot(self):
-        async with self._lock:
-            self._active_downloads -= 1
-```
+- On stop, `BotApplication.stop()` calls `DownloadSlotManager.close()` before `Application.stop()`. `Application.stop()` awaits all `create_task` tasks, so without this a restart would wait for the whole queue to download. Queued tasks exit early and keep their `pending_tasks` row; running downloads finish normally.
+- On start, `BotApplication.start()` calls `restore_pending_tasks()` after `Application.start()` (only then are `create_task` tasks awaited on stop). `queued` rows are re-enqueued in their original order. `running` rows are not retried, because the bot cannot tell whether the video already reached the channel; the user is asked to resend the link instead.
 
-Behavior:
-
-- **Slot available:** Counter increments, proceed to download. Decrement in `finally` after publish or failure.
-- **No slot available:** The background task sends "Server busy (X/Y download slots in use). Please resend your link to try again." to the user and exits. No queuing, no retry.
-
-This avoids `asyncio.Semaphore` (which lacks a non-blocking try-acquire in the stdlib), avoids queue semantics, and avoids stale-task-on-restart problems. The conversation state machine stays at exactly two states (WAITING_CAPTION, WAITING_CHANNEL). `/cancel` only applies during conversation states; background download tasks run to completion (or failure) independently.
-
-**Pre-download disk check:** Before acquiring a slot, check available disk space on the download volume (`shutil.disk_usage`). Required free space = `max_concurrent_downloads * max_file_size_mb * 2` MB. `max_concurrent_downloads` already includes the current task (the slot hasn't been acquired yet, but the formula reserves space for all possible concurrent tasks at full capacity). The `*2` factor accounts for yt-dlp temp files + faststart remux producing a second copy during processing. If below threshold, reject with: "Insufficient disk space, please try again later" and log a warning.
+**Pre-download disk check:** After acquiring a slot, check available disk space on the download volume (`shutil.disk_usage`). Required free space = `max_concurrent_downloads * max_file_size_mb * 2` MB. The formula reserves space for all possible concurrent tasks at full capacity. The `*2` factor accounts for yt-dlp temp files + faststart remux producing a second copy during processing. If below threshold, reject with: "Insufficient disk space, please try again later" and log a warning.
 
 **Cleanup:** Temp files are cleaned in a `finally` block per download task. On bot startup, any stale files in the download directory older than 1 hour are purged.
 
