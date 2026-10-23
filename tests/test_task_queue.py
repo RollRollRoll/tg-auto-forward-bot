@@ -156,3 +156,45 @@ async def test_sqlite_store_round_trip(db):
     ]
     await store.delete(a)
     assert [r["id"] for r in await store.list()] == [b]
+
+
+@pytest.mark.asyncio
+async def test_failing_on_queued_callback_cleans_up_without_leaking_a_slot():
+    store = InMemoryTaskStore()
+    queue = TaskQueue(store)
+    first = await queue.submit(_task("https://a"), max_slots=1)
+    second = await queue.submit(_task("https://b"), max_slots=1)
+    third = await queue.submit(_task("https://c"), max_slots=1)
+
+    async def notify_fails(ticket):
+        raise RuntimeError("blocked by user")
+
+    with pytest.raises(RuntimeError):
+        async with queue.slot(second, on_queued=notify_fails):
+            pass
+
+    assert [r["source_url"] for r in await store.list()] == ["https://a", "https://c"]
+    async with queue.slot(first):
+        pass
+    # b 失败后不占 slot，c 能拿到唯一的 slot
+    assert [t["source_url"] for t in queue.get_active_tasks()] == ["https://c"]
+    async with queue.slot(third):
+        pass
+    assert queue.get_active_tasks() == [] and await store.list() == []
+
+
+@pytest.mark.asyncio
+async def test_on_queued_is_called_only_for_queued_tickets():
+    queue = TaskQueue(InMemoryTaskStore())
+    seen = []
+
+    async def on_queued(ticket):
+        seen.append(ticket.position)
+
+    first = await queue.submit(_task("https://a"), max_slots=1)
+    second = await queue.submit(_task("https://b"), max_slots=1)
+    async with queue.slot(first, on_queued=on_queued):
+        pass
+    async with queue.slot(second, on_queued=on_queued):
+        pass
+    assert seen == [1]

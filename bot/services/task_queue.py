@@ -117,15 +117,19 @@ class TaskQueue:
             return Ticket(task_id=task_id, position=len(self._queue))
 
     @asynccontextmanager
-    async def slot(self, ticket: Ticket):
+    async def slot(self, ticket: Ticket, *, on_queued=None):
         """等待并占用 slot。
 
         拿到时 yield True，退出后释放 slot 并删除 pending 记录；
         队列已关闭时 yield False，pending 记录保留，重启后由 restore() 恢复。
+        on_queued(ticket) 在排队任务开始等待前调用（如通知用户排队位置），
+        它抛异常时同样释放 slot 并删除记录，不会占着 slot 不放。
         """
         task_id = ticket.task_id
         keep_pending = False
         try:
+            if ticket.position > 0 and on_queued is not None:
+                await on_queued(ticket)
             waiter = self._waiters.get(task_id)
             got = await waiter if waiter is not None else task_id in self._tasks
             if not got:

@@ -73,13 +73,16 @@ async def _process(
     max_concurrent: int, max_file_size: int, restored: bool = False,
 ) -> None:
     user_chat_id = task["user_chat_id"]
-    if ticket.position > 0:
+
+    async def notify_queued(t: Ticket) -> None:
         prefix = "Bot restarted. " if restored else f"All {max_concurrent} download slots are busy. "
         await bot.send_message(
             chat_id=user_chat_id,
-            text=f"{prefix}Your task is queued at position {ticket.position} and will start automatically.",
+            text=f"{prefix}Your task is queued at position {t.position} and will start automatically.",
         )
-    async with task_queue.slot(ticket) as ok:
+
+    # 排队通知放进 slot() 里发：发送失败时 slot 和 pending 记录由 TaskQueue 统一清理
+    async with task_queue.slot(ticket, on_queued=notify_queued) as ok:
         if not ok:
             # 正在关闭：pending 记录保留，重启后恢复
             await bot.send_message(chat_id=user_chat_id, text=_SAVED_FOR_RESTART)
