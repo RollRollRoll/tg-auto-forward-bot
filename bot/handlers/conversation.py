@@ -151,13 +151,11 @@ async def _start_download(update: Update, context: ContextTypes.DEFAULT_TYPE, re
     msg = reply_msg or (update.callback_query.message if update.callback_query else update.message)
     await msg.reply_text("Task accepted. Downloading video...")
 
-    slot_manager = context.bot_data["slot_manager"]
-
     max_resolution = context.user_data.get("max_resolution", 1080)
 
     context.application.create_task(
         download_and_publish(
-            bot=context.bot, slot_manager=slot_manager,
+            bot=context.bot, task_queue=context.bot_data["task_queue"],
             user_chat_id=user_chat_id, user_id=user_id,
             source_url=source_url, caption=caption, channel_chat_id=channel_chat_id,
             max_resolution=max_resolution,

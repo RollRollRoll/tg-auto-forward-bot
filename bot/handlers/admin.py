@@ -186,11 +186,11 @@ _STATUS_LABELS = {
 }
 
 
-async def format_tasks_text(slot_manager) -> str:
+async def format_tasks_text(task_queue) -> str:
     db = await get_db()
     max_concurrent = int(await get_setting(db, "max_concurrent_downloads") or "2")
 
-    active_tasks = slot_manager.get_active_tasks()
+    active_tasks = task_queue.get_active_tasks()
 
     lines: list[str] = []
 
@@ -220,7 +220,7 @@ async def format_tasks_text(slot_manager) -> str:
         lines.append(f"<b>Active Downloads (0/{max_concurrent}):</b>")
         lines.append("No active tasks.\n")
 
-    queued_tasks = slot_manager.get_queued_tasks()
+    queued_tasks = task_queue.get_queued_tasks()
     if queued_tasks:
         lines.append(f"<b>Queued ({len(queued_tasks)}):</b>")
         for t in queued_tasks:
@@ -250,6 +250,5 @@ async def format_tasks_text(slot_manager) -> str:
 @private_chat_only
 @admin_only
 async def tasks_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    slot_manager = context.bot_data["slot_manager"]
-    text = await format_tasks_text(slot_manager)
+    text = await format_tasks_text(context.bot_data["task_queue"])
     await update.message.reply_text(text, parse_mode="HTML")

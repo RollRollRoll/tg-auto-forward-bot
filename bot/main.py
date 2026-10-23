@@ -17,8 +17,9 @@ from bot.handlers.admin import (
 from bot.handlers.conversation import build_conversation_handler
 from bot.handlers.menu import menu_callback_handler
 from bot.handlers.start import help_handler, start_handler
-from bot.services.downloader import DownloadSlotManager, cleanup_stale_files
+from bot.services.downloader import cleanup_stale_files
 from bot.services.pipeline import restore_pending_tasks
+from bot.services.task_queue import SqliteTaskStore, TaskQueue
 
 logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -40,9 +41,9 @@ class BotApplication(Application):
     async def stop(self) -> None:
         # stop() 会等待所有 create_task 任务结束；先让排队中的任务退出，
         # 否则重启时要等整个队列下载完才能退出。它们仍保存在 pending_tasks 里，下次启动时恢复
-        slot_manager = self.bot_data.get("slot_manager")
-        if slot_manager is not None:
-            slot_manager.close()
+        task_queue = self.bot_data.get("task_queue")
+        if task_queue is not None:
+            task_queue.close()
         await super().stop()
 
 
@@ -53,6 +54,8 @@ async def post_init(application) -> None:
     await init_db(db_path)
     db = await get_db()
     await create_tables(db)
+    # 依赖数据库连接，所以在这里而不是 build 时创建
+    application.bot_data["task_queue"] = TaskQueue(SqliteTaskStore(db))
     interrupted = await fail_interrupted_post_logs(db)
     if interrupted:
         logger.info("Marked %d interrupted post logs as failed", interrupted)
@@ -98,7 +101,6 @@ def main() -> None:
         .post_stop(post_stop)
         .build()
     )
-    app.bot_data["slot_manager"] = DownloadSlotManager()
     app.add_handler(build_conversation_handler())
     app.add_handler(CommandHandler("start", start_handler))
     app.add_handler(CommandHandler("help", help_handler))
