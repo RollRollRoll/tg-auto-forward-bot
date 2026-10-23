@@ -16,7 +16,7 @@ async def test_submit_with_free_slot_takes_it_and_persists_queued():
     store = InMemoryTaskStore()
     queue = TaskQueue(store)
     ticket = await queue.submit(_task(), max_slots=1)
-    assert ticket.position == 0
+    assert (ticket.position, ticket.closed) == (0, False)
     assert [r["status"] for r in await store.list()] == ["queued"]
 
 
@@ -85,6 +85,8 @@ async def test_submit_after_close_keeps_record_and_slot_is_refused():
     queue = TaskQueue(store)
     queue.close()
     ticket = await queue.submit(_task(), max_slots=1)
+    # 从 ticket 本身就能看出队列已关闭，不必等 slot() 的返回值
+    assert ticket.closed
     async with queue.slot(ticket) as ok:
         assert not ok
     assert [r["status"] for r in await store.list()] == ["queued"]
