@@ -8,7 +8,7 @@ on:
   workflow_dispatch:      # 支持在 Actions 页面手动触发
 
 env:
-  IMAGE: ${{ secrets.DOCKERHUB_USERNAME }}/tg-auto-forward-bot
+  IMAGE: fancj/tg-auto-forward-bot
 
 jobs:
   build:
