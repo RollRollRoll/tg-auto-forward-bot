@@ -69,7 +69,10 @@ class SqliteTaskStore:
 @dataclass(frozen=True)
 class Ticket:
     task_id: int
+    # 0 表示已拿到 slot，>0 表示排队位置；closed 时无意义
     position: int
+    # 提交时队列已关闭：记录已落库，等重启后由 restore() 恢复
+    closed: bool = False
 
 
 class TaskQueue:
@@ -111,7 +114,7 @@ class TaskQueue:
         async with self._lock:
             if self._closed:
                 # 已关闭：记录已落库，留到重启后恢复
-                return Ticket(task_id=task_id, position=0)
+                return Ticket(task_id=task_id, position=0, closed=True)
             # 每次登记都以最新的并发设置为准；设置调大后可以立刻放行排队任务
             self._max_slots = max_slots
             self._promote()
@@ -142,6 +145,10 @@ class TaskQueue:
         task_id = ticket.task_id
         keep_pending = False
         try:
+            if ticket.closed:
+                keep_pending = True
+                yield False
+                return
             if ticket.position > 0 and on_queued is not None:
                 await on_queued(ticket)
             waiter = self._waiters.get(task_id)
