@@ -27,9 +27,9 @@ async def test_submit_without_free_slot_queues_in_fifo_order():
     second = await queue.submit(_task("https://b"), max_slots=1)
     third = await queue.submit(_task("https://c"), max_slots=1)
     assert (first.position, second.position, third.position) == (0, 1, 2)
-    assert [t["source_url"] for t in queue.get_queued_tasks()] == ["https://b", "https://c"]
+    assert [t["url"] for t in queue.get_queued_tasks()] == ["https://b", "https://c"]
     assert [t["position"] for t in queue.get_queued_tasks()] == [1, 2]
-    assert [t["source_url"] for t in queue.get_active_tasks()] == ["https://a"]
+    assert [t["url"] for t in queue.get_active_tasks()] == ["https://a"]
 
 
 @pytest.mark.asyncio
@@ -48,7 +48,7 @@ async def test_slot_marks_running_then_deletes_and_promotes_next():
     assert [r["source_url"] for r in await store.list()] == ["https://b"]
     async with queue.slot(second) as ok:
         assert ok
-        assert [t["source_url"] for t in queue.get_active_tasks()] == ["https://b"]
+        assert [t["url"] for t in queue.get_active_tasks()] == ["https://b"]
     assert await store.list() == []
     assert queue.get_active_tasks() == [] and queue.get_queued_tasks() == []
 
@@ -61,7 +61,7 @@ async def test_raising_max_slots_promotes_queued_tasks():
     third = await queue.submit(_task("https://c"), max_slots=3)
     # b 被立刻放行；c 前面已无排队者，也直接拿到 slot
     assert third.position == 0
-    assert [t["source_url"] for t in queue.get_active_tasks()] == ["https://a", "https://b", "https://c"]
+    assert [t["url"] for t in queue.get_active_tasks()] == ["https://a", "https://b", "https://c"]
     assert queue.get_queued_tasks() == []
 
 
@@ -127,10 +127,10 @@ async def test_cancelled_waiter_leaves_queue_without_taking_a_slot():
     with pytest.raises(asyncio.CancelledError):
         await waiting
 
-    assert [t["source_url"] for t in queue.get_queued_tasks()] == ["https://c"]
+    assert [t["url"] for t in queue.get_queued_tasks()] == ["https://c"]
     async with queue.slot(first):
         pass
-    assert [t["source_url"] for t in queue.get_active_tasks()] == ["https://c"]
+    assert [t["url"] for t in queue.get_active_tasks()] == ["https://c"]
     assert [r["source_url"] for r in await store.list()] == ["https://c"]
 
 
@@ -177,7 +177,7 @@ async def test_failing_on_queued_callback_cleans_up_without_leaking_a_slot():
     async with queue.slot(first):
         pass
     # b 失败后不占 slot，c 能拿到唯一的 slot
-    assert [t["source_url"] for t in queue.get_active_tasks()] == ["https://c"]
+    assert [t["url"] for t in queue.get_active_tasks()] == ["https://c"]
     async with queue.slot(third):
         pass
     assert queue.get_active_tasks() == [] and await store.list() == []
@@ -198,3 +198,15 @@ async def test_on_queued_is_called_only_for_queued_tickets():
     async with queue.slot(second, on_queued=on_queued):
         pass
     assert seen == [1]
+
+
+@pytest.mark.asyncio
+async def test_snapshots_keep_the_shape_used_by_the_tasks_view():
+    queue = TaskQueue(InMemoryTaskStore())
+    first = await queue.submit(_task("https://a"), max_slots=1)
+    second = await queue.submit(_task("https://b"), max_slots=1)
+    active, queued = queue.get_active_tasks()[0], queue.get_queued_tasks()[0]
+    assert set(active) == {"task_id", "elapsed", "url", "user_id", "start_time", "progress", "status"}
+    assert (active["task_id"], active["status"]) == (first.task_id, "starting")
+    assert set(queued) == set(active) | {"position"}
+    assert (queued["task_id"], queued["status"], queued["position"]) == (second.task_id, "queued", 1)
