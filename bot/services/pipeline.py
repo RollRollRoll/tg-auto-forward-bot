@@ -95,6 +95,14 @@ async def _process(
         )
 
 
+async def _notify(bot: Bot, chat_id: int, text: str) -> None:
+    # 结果通知发不出去（如用户屏蔽了 bot）时只记日志：post log 已是最终状态，不能因此改写
+    try:
+        await bot.send_message(chat_id=chat_id, text=text)
+    except Exception:
+        logger.warning("Failed to notify user %d: %s", chat_id, text)
+
+
 async def _run_task(
     *, bot: Bot, db, task_queue: TaskQueue, task_id: int, task: Task,
     max_concurrent: int, max_file_size: int,
@@ -103,7 +111,7 @@ async def _run_task(
     # 拿到槽位后再检查磁盘：排队期间剩余空间可能已经变化
     has_space, free_mb = check_disk_space(max_concurrent, max_file_size)
     if not has_space:
-        await bot.send_message(chat_id=user_chat_id, text="Insufficient disk space, please try again later.")
+        await _notify(bot, user_chat_id, "Insufficient disk space, please try again later.")
         return
 
     def _progress_hook(d: dict) -> None:
@@ -128,7 +136,7 @@ async def _run_task(
 
         if result["file_size_mb"] > max_file_size:
             await update_post_log_status(db, log_id, status="failed", error_message=f"File too large: {result['file_size_mb']:.1f} MB")
-            await bot.send_message(chat_id=user_chat_id, text=f"Video too large ({result['file_size_mb']:.1f} MB), exceeds limit ({max_file_size} MB).")
+            await _notify(bot, user_chat_id, f"Video too large ({result['file_size_mb']:.1f} MB), exceeds limit ({max_file_size} MB).")
             return
 
         task_queue.update_progress(task_id, 100.0, "publishing")
@@ -140,16 +148,16 @@ async def _run_task(
 
         if message_id:
             await update_post_log_status(db, log_id, status="done", message_id=message_id)
-            await bot.send_message(chat_id=user_chat_id, text=f"Published successfully! (message #{message_id})")
+            await _notify(bot, user_chat_id, f"Published successfully! (message #{message_id})")
         else:
             await update_post_log_status(db, log_id, status="failed", error_message="Failed to send to channel")
-            await bot.send_message(chat_id=user_chat_id, text="Send failed, please check Bot permissions.")
+            await _notify(bot, user_chat_id, "Send failed, please check Bot permissions.")
 
     except Exception as e:
         logger.exception("Pipeline error for %s", task.source_url)
         if log_id:
             await update_post_log_status(db, log_id, status="failed", error_message=str(e))
-        await bot.send_message(chat_id=user_chat_id, text=f"Download failed: {e}")
+        await _notify(bot, user_chat_id, f"Download failed: {e}")
     finally:
         # 槽位由外层 _process 的 slot() 统一释放
         if tmp_dir:

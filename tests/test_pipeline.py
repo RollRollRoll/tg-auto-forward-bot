@@ -234,3 +234,24 @@ async def test_failed_queue_notification_does_not_leak_slot(db):
     # 通知失败的任务不能占着唯一的 slot，pending 记录也要删掉，否则重启后会被重跑
     assert slot_mgr.get_active_tasks() == []
     assert await list_pending_tasks(db) == []
+
+
+@pytest.mark.asyncio
+async def test_failed_success_notification_keeps_post_log_done(db):
+    slot_mgr = TaskQueue(SqliteTaskStore(db))
+    bot = AsyncMock()
+
+    async def send_message(*, chat_id, text):
+        # 用户屏蔽了 bot：视频已发到频道，只是通知发不出去
+        raise RuntimeError("bot was blocked by the user")
+
+    bot.send_message.side_effect = send_message
+    with ExitStack() as stack:
+        for p in _patches():
+            stack.enter_context(p)
+        await _run(bot, slot_mgr)
+
+    cursor = await db.execute("SELECT status, message_id FROM post_logs")
+    assert [tuple(r) for r in await cursor.fetchall()] == [("done", 999)]
+    assert slot_mgr.get_active_tasks() == []
+    assert await list_pending_tasks(db) == []
