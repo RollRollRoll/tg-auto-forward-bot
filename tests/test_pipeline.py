@@ -33,12 +33,14 @@ def _run(bot, slot_mgr, url="https://x.com/u/status/1"):
     )
 
 
-async def _until(cond, steps=200):
-    # 让出事件循环，直到条件满足
-    for _ in range(steps):
+async def _until(cond, timeout=2.0):
+    # 轮询直到条件满足；aiosqlite 在后台线程执行，需要真正等待而不是只让出事件循环
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while loop.time() < deadline:
         if cond():
             return
-        await asyncio.sleep(0)
+        await asyncio.sleep(0.01)
     raise AssertionError("condition not met")
 
 
