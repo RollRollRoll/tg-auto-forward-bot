@@ -30,10 +30,10 @@ def _patches(*, disk_ok=True, download=None, publish_id=999):
 
 
 def _run(bot, slot_mgr, url="https://x.com/u/status/1"):
-    return download_and_publish(
-        bot=bot, task_queue=slot_mgr, user_chat_id=111, user_id=111,
-        source_url=url, caption="test", channel_chat_id=-100123,
-    )
+    return download_and_publish(bot=bot, task_queue=slot_mgr, task=Task(
+        user_id=111, user_chat_id=111, source_url=url, caption="test",
+        channel_chat_id=-100123, max_resolution=1080,
+    ))
 
 
 async def _until(cond, timeout=2.0):

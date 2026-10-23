@@ -69,17 +69,9 @@ async def _read_limits(db) -> tuple[int, int]:
     return max_concurrent, max_file_size
 
 
-async def download_and_publish(
-    *, bot: Bot, task_queue: TaskQueue, user_chat_id: int,
-    user_id: int, source_url: str, caption: str, channel_chat_id: int,
-    max_resolution: int = 1080,
-) -> None:
+async def download_and_publish(*, bot: Bot, task_queue: TaskQueue, task: Task) -> None:
     db = await get_db()
     max_concurrent, max_file_size = await _read_limits(db)
-    task = Task(
-        user_id=user_id, user_chat_id=user_chat_id, source_url=source_url,
-        caption=caption, channel_chat_id=channel_chat_id, max_resolution=max_resolution,
-    )
     ticket = await task_queue.submit(task, max_slots=max_concurrent)
     await _process(
         bot=bot, db=db, task_queue=task_queue, ticket=ticket, task=task,

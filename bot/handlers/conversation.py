@@ -1,5 +1,6 @@
 from __future__ import annotations
 import logging
+from dataclasses import dataclass
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import (
@@ -12,9 +13,27 @@ from bot.database.crud import get_setting, list_channels
 from bot.handlers.filters import admin_only, private_chat_only
 from bot.services.downloader import extract_available_resolutions
 from bot.services.pipeline import download_and_publish
+from bot.services.task_queue import Task
 from bot.utils.validators import extract_url, sanitize_caption
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class TaskDraft:
+    """会话中逐步填写的 Task，填完后由 to_task() 生成 Task。"""
+    source_url: str
+    caption: str = ""
+    channel_chat_id: int | None = None
+    # 兜底默认值；正常流程里分辨率选择步骤一定会设置它
+    max_resolution: int = 1080
+
+    def to_task(self, *, user_id: int, user_chat_id: int) -> Task:
+        return Task(
+            user_id=user_id, user_chat_id=user_chat_id, source_url=self.source_url,
+            caption=self.caption, channel_chat_id=self.channel_chat_id,
+            max_resolution=self.max_resolution,
+        )
 
 WAITING_CAPTION = 0
 WAITING_RESOLUTION = 1
@@ -34,15 +53,21 @@ async def entry_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
     if not url:
         return ConversationHandler.END
 
-    context.user_data["source_url"] = url
+    context.user_data["draft"] = TaskDraft(source_url=url)
     await update.message.reply_text("Link received. Please enter the caption (HTML format supported, max 1024 chars).\nSend /skip to publish without caption.")
     return WAITING_CAPTION
 
 
+def _reply_target(update: Update, reply_msg=None):
+    # 优先回复调用方指定的消息，否则回复按钮所在消息或用户发来的消息
+    if reply_msg is not None:
+        return reply_msg
+    return update.callback_query.message if update.callback_query else update.message
+
+
 async def _fetch_and_ask_resolution(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    url = context.user_data["source_url"]
-    msg = update.callback_query.message if update.callback_query else update.message
-    status_msg = await msg.reply_text("Checking available resolutions...")
+    url = context.user_data["draft"].source_url
+    status_msg = await _reply_target(update).reply_text("Checking available resolutions...")
 
     try:
         heights = await extract_available_resolutions(url)
@@ -60,7 +85,7 @@ async def _fetch_and_ask_resolution(update: Update, context: ContextTypes.DEFAUL
     resolutions = [h for h in heights if h <= max_resolution] or [min(heights)]
 
     if len(resolutions) == 1:
-        context.user_data["max_resolution"] = resolutions[0]
+        context.user_data["draft"].max_resolution = resolutions[0]
         label = _RESOLUTION_LABELS.get(resolutions[0], f"{resolutions[0]}p")
         await status_msg.edit_text(f"Only one resolution available: {label}. Proceeding...")
         return await _ask_channel_or_download(update, context, status_msg)
@@ -83,7 +108,7 @@ async def _fetch_and_ask_resolution(update: Update, context: ContextTypes.DEFAUL
 
 
 async def skip_caption_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    context.user_data["caption"] = ""
+    context.user_data["draft"].caption = ""
     return await _fetch_and_ask_resolution(update, context)
 
 
@@ -94,7 +119,7 @@ async def caption_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await update.message.reply_text(error)
         return WAITING_CAPTION
 
-    context.user_data["caption"] = sanitized
+    context.user_data["draft"].caption = sanitized
     return await _fetch_and_ask_resolution(update, context)
 
 
@@ -103,20 +128,18 @@ async def _ask_channel_or_download(update: Update, context: ContextTypes.DEFAULT
     channels = await list_channels(db)
 
     if not channels:
-        msg = reply_msg or (update.callback_query.message if update.callback_query else update.message)
-        await msg.reply_text("No channels configured. Use /add_channel first.")
+        await _reply_target(update, reply_msg).reply_text("No channels configured. Use /add_channel first.")
         return ConversationHandler.END
 
     if len(channels) == 1:
-        context.user_data["channel_chat_id"] = channels[0]["chat_id"]
+        context.user_data["draft"].channel_chat_id = channels[0]["chat_id"]
         return await _start_download(update, context, reply_msg)
 
-    msg = reply_msg or (update.callback_query.message if update.callback_query else update.message)
     keyboard = [
         [InlineKeyboardButton(ch["title"], callback_data=f"ch:{ch['chat_id']}")]
         for ch in channels
     ]
-    await msg.reply_text("Select target channel:", reply_markup=InlineKeyboardMarkup(keyboard))
+    await _reply_target(update, reply_msg).reply_text("Select target channel:", reply_markup=InlineKeyboardMarkup(keyboard))
     return WAITING_CHANNEL
 
 
@@ -124,14 +147,14 @@ async def resolution_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
     query = update.callback_query
     await query.answer()
     resolution = int(query.data.removeprefix("res:"))
-    context.user_data["max_resolution"] = resolution
+    context.user_data["draft"].max_resolution = resolution
     return await _ask_channel_or_download(update, context)
 
 
 async def channel_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
     await query.answer()
-    context.user_data["channel_chat_id"] = int(query.data.removeprefix("ch:"))
+    context.user_data["draft"].channel_chat_id = int(query.data.removeprefix("ch:"))
     return await _start_download(update, context)
 
 
@@ -142,24 +165,13 @@ async def cancel_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 
 async def _start_download(update: Update, context: ContextTypes.DEFAULT_TYPE, reply_msg=None) -> int:
-    source_url = context.user_data["source_url"]
-    caption = context.user_data["caption"]
-    channel_chat_id = context.user_data["channel_chat_id"]
-    user_id = update.effective_user.id
-    user_chat_id = update.effective_chat.id
-
-    msg = reply_msg or (update.callback_query.message if update.callback_query else update.message)
-    await msg.reply_text("Task accepted. Downloading video...")
-
-    max_resolution = context.user_data.get("max_resolution", 1080)
+    task = context.user_data["draft"].to_task(
+        user_id=update.effective_user.id, user_chat_id=update.effective_chat.id,
+    )
+    await _reply_target(update, reply_msg).reply_text("Task accepted. Downloading video...")
 
     context.application.create_task(
-        download_and_publish(
-            bot=context.bot, task_queue=context.bot_data["task_queue"],
-            user_chat_id=user_chat_id, user_id=user_id,
-            source_url=source_url, caption=caption, channel_chat_id=channel_chat_id,
-            max_resolution=max_resolution,
-        ),
+        download_and_publish(bot=context.bot, task_queue=context.bot_data["task_queue"], task=task),
         update=update,
     )
 
