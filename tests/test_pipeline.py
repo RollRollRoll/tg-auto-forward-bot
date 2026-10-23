@@ -4,18 +4,11 @@ from contextlib import ExitStack
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from bot.services.pipeline import download_and_publish
+from bot.database.crud import create_pending_task, list_pending_tasks, set_setting
 from bot.services.downloader import DownloadSlotManager
+from bot.services.pipeline import download_and_publish, restore_pending_tasks
 
-
-async def _make_get_setting(overrides=None):
-    defaults = {"max_concurrent_downloads": "1", "max_file_size_mb": "2000", "max_resolution": "1080"}
-    if overrides:
-        defaults.update(overrides)
-    async def _get_setting(db, key):
-        return defaults.get(key)
-    return _get_setting
-
+# 这些测试使用 conftest 里的内存 SQLite（db fixture），pending_tasks / post_logs 都是真实读写
 
 _RESULT = {
     "file_path": "/tmp/test.mp4", "tmp_dir": "/tmp/testdir",
@@ -23,169 +16,217 @@ _RESULT = {
 }
 
 
-def _success_patches(get_setting_fn):
+def _patches(*, disk_ok=True, download=None, publish_id=999):
+    download = download or AsyncMock(return_value=_RESULT)
     return [
-        patch("bot.services.pipeline.get_db", new_callable=AsyncMock),
-        patch("bot.services.pipeline.get_setting", side_effect=get_setting_fn),
-        patch("bot.services.pipeline.check_disk_space", return_value=(True, 5000)),
-        patch("bot.services.pipeline.create_post_log", new_callable=AsyncMock, return_value=1),
-        patch("bot.services.pipeline.update_post_log_status", new_callable=AsyncMock),
-        patch("bot.services.pipeline.download_video", new_callable=AsyncMock, return_value=_RESULT),
-        patch("bot.services.pipeline.publish_video", new_callable=AsyncMock, return_value=999),
+        patch("bot.services.pipeline.check_disk_space", return_value=(disk_ok, 5000)),
+        patch("bot.services.pipeline.download_video", download),
+        patch("bot.services.pipeline.publish_video", new_callable=AsyncMock, return_value=publish_id),
         patch("shutil.rmtree"),
     ]
 
 
-def _run(bot, slot_mgr):
+def _run(bot, slot_mgr, url="https://x.com/u/status/1"):
     return download_and_publish(
         bot=bot, slot_manager=slot_mgr, user_chat_id=111, user_id=111,
-        source_url="https://x.com/u/status/1", caption="test", channel_chat_id=-100123,
+        source_url=url, caption="test", channel_chat_id=-100123,
     )
 
 
+async def _until(cond, steps=200):
+    # 让出事件循环，直到条件满足
+    for _ in range(steps):
+        if cond():
+            return
+        await asyncio.sleep(0)
+    raise AssertionError("condition not met")
+
+
+def _texts(bot):
+    return [c.kwargs["text"] for c in bot.send_message.call_args_list]
+
+
 @pytest.mark.asyncio
-async def test_pipeline_queues_when_no_slot_then_runs():
+async def test_pipeline_success_path(db):
     slot_mgr = DownloadSlotManager()
-    busy_id, _ = await slot_mgr.enqueue(1)
     bot = AsyncMock()
-    get_setting_fn = await _make_get_setting()
     with ExitStack() as stack:
-        for p in _success_patches(get_setting_fn):
+        for p in _patches():
+            stack.enter_context(p)
+        await _run(bot, slot_mgr)
+    assert "success" in _texts(bot)[-1].lower()
+    assert slot_mgr.active_count == 0
+    assert await list_pending_tasks(db) == []
+    cursor = await db.execute("SELECT status, message_id FROM post_logs")
+    assert [tuple(r) for r in await cursor.fetchall()] == [("done", 999)]
+
+
+@pytest.mark.asyncio
+async def test_pipeline_rejects_when_no_disk_space(db):
+    slot_mgr = DownloadSlotManager()
+    bot = AsyncMock()
+    with ExitStack() as stack:
+        for p in _patches(disk_ok=False):
+            stack.enter_context(p)
+        await _run(bot, slot_mgr)
+    assert "disk" in _texts(bot)[-1].lower()
+    assert slot_mgr.active_count == 0
+    assert await list_pending_tasks(db) == []
+
+
+@pytest.mark.asyncio
+async def test_pipeline_rejects_oversized_file(db):
+    await set_setting(db, "max_file_size_mb", "50")
+    slot_mgr = DownloadSlotManager()
+    bot = AsyncMock()
+    big = AsyncMock(return_value={**_RESULT, "file_size_mb": 100.0})
+    with ExitStack() as stack:
+        for p in _patches(download=big):
+            stack.enter_context(p)
+        await _run(bot, slot_mgr)
+    assert "too large" in _texts(bot)[-1].lower()
+    assert await list_pending_tasks(db) == []
+
+
+@pytest.mark.asyncio
+async def test_pipeline_download_failure(db):
+    slot_mgr = DownloadSlotManager()
+    bot = AsyncMock()
+    failing = AsyncMock(side_effect=RuntimeError("yt-dlp error"))
+    with ExitStack() as stack:
+        for p in _patches(download=failing):
+            stack.enter_context(p)
+        await _run(bot, slot_mgr)
+    assert "failed" in _texts(bot)[-1].lower()
+    assert slot_mgr.active_count == 0
+    assert await list_pending_tasks(db) == []
+
+@pytest.mark.asyncio
+async def test_pipeline_queues_when_no_slot_then_runs(db):
+    await set_setting(db, "max_concurrent_downloads", "1")
+    slot_mgr = DownloadSlotManager()
+    await slot_mgr.enqueue(1, task_id=9999)  # 占住唯一的槽位
+    bot = AsyncMock()
+    with ExitStack() as stack:
+        for p in _patches():
             stack.enter_context(p)
         task = asyncio.create_task(_run(bot, slot_mgr))
-        # 等任务进入队列并发出排队通知
-        for _ in range(50):
-            if slot_mgr.queued_count:
-                break
-            await asyncio.sleep(0)
-        assert slot_mgr.queued_count == 1
-        assert "queued at position 1" in str(bot.send_message.call_args_list[0])
+        await _until(lambda: bot.send_message.await_count == 1)
+        assert "queued at position 1" in _texts(bot)[0]
+        assert [r["status"] for r in await list_pending_tasks(db)] == ["queued"]
         assert not task.done()
 
-        await slot_mgr.release_slot(busy_id)
+        await slot_mgr.release_slot(9999)
         await asyncio.wait_for(task, 1)
 
-    assert "success" in str(bot.send_message.call_args).lower()
+    assert "success" in _texts(bot)[-1].lower()
     assert slot_mgr.active_count == 0
-    assert slot_mgr.queued_count == 0
+    assert await list_pending_tasks(db) == []
 
 
 @pytest.mark.asyncio
-async def test_pipeline_queued_task_cancelled_on_close():
+async def test_queued_task_is_kept_in_db_when_closed(db):
+    await set_setting(db, "max_concurrent_downloads", "1")
     slot_mgr = DownloadSlotManager()
-    await slot_mgr.enqueue(1)
+    await slot_mgr.enqueue(1, task_id=9999)
     bot = AsyncMock()
-    get_setting_fn = await _make_get_setting()
+    download = AsyncMock(return_value=_RESULT)
     with ExitStack() as stack:
-        for p in _success_patches(get_setting_fn):
+        for p in _patches(download=download):
             stack.enter_context(p)
-        download_mock = stack.enter_context(
-            patch("bot.services.pipeline.download_video", new_callable=AsyncMock, return_value=_RESULT)
-        )
         task = asyncio.create_task(_run(bot, slot_mgr))
-        for _ in range(50):
-            if slot_mgr.queued_count:
-                break
-            await asyncio.sleep(0)
+        await _until(lambda: slot_mgr.queued_count == 1)
         slot_mgr.close()
         await asyncio.wait_for(task, 1)
 
-    download_mock.assert_not_awaited()
-    assert "restarting" in str(bot.send_message.call_args).lower()
-    assert slot_mgr.queued_count == 0
+    download.assert_not_awaited()
+    assert "saved" in _texts(bot)[-1]
+    rows = await list_pending_tasks(db)
+    assert [(r["source_url"], r["status"]) for r in rows] == [("https://x.com/u/status/1", "queued")]
 
 
 @pytest.mark.asyncio
-async def test_pipeline_rejects_after_close():
+async def test_task_submitted_after_close_is_kept_in_db(db):
     slot_mgr = DownloadSlotManager()
     slot_mgr.close()
     bot = AsyncMock()
-    get_setting_fn = await _make_get_setting()
-    with patch("bot.services.pipeline.get_db", new_callable=AsyncMock), \
-         patch("bot.services.pipeline.get_setting", side_effect=get_setting_fn):
-        await _run(bot, slot_mgr)
+    await _run(bot, slot_mgr)
     bot.send_message.assert_awaited_once()
-    assert "shutting down" in str(bot.send_message.call_args).lower()
+    assert "saved" in _texts(bot)[0]
+    assert [r["status"] for r in await list_pending_tasks(db)] == ["queued"]
+
+
+def _fake_application(slot_mgr):
+    app = MagicMock()
+    app.bot = AsyncMock()
+    app.bot_data = {"slot_manager": slot_mgr}
+    app.tasks = []
+    app.create_task = lambda coro, **kw: app.tasks.append(asyncio.create_task(coro)) or app.tasks[-1]
+    return app
+
+
+async def _add_pending(db, url, *, running=False):
+    task_id = await create_pending_task(
+        db, user_id=111, user_chat_id=111, source_url=url,
+        caption="c", channel_chat_id=-100123, max_resolution=720,
+    )
+    if running:
+        await db.execute("UPDATE pending_tasks SET status = 'running' WHERE id = ?", (task_id,))
+        await db.commit()
+    return task_id
 
 
 @pytest.mark.asyncio
-async def test_pipeline_rejects_when_no_disk_space():
+async def test_restore_resumes_queued_tasks_in_order(db):
+    await set_setting(db, "max_concurrent_downloads", "1")
+    await _add_pending(db, "https://a")
+    await _add_pending(db, "https://b")
     slot_mgr = DownloadSlotManager()
-    bot = AsyncMock()
-    get_setting_fn = await _make_get_setting()
-    with patch("bot.services.pipeline.get_db", new_callable=AsyncMock), \
-         patch("bot.services.pipeline.get_setting", side_effect=get_setting_fn), \
-         patch("bot.services.pipeline.check_disk_space", return_value=(False, 100)):
-        await download_and_publish(
-            bot=bot, slot_manager=slot_mgr, user_chat_id=111, user_id=111,
-            source_url="https://x.com/u/status/1", caption="test", channel_chat_id=-100123,
-        )
-    assert "disk" in str(bot.send_message.call_args).lower()
+    app = _fake_application(slot_mgr)
+    download = AsyncMock(return_value=_RESULT)
+    with ExitStack() as stack:
+        for p in _patches(download=download):
+            stack.enter_context(p)
+        assert await restore_pending_tasks(app) == 2
+        await asyncio.wait_for(asyncio.gather(*app.tasks), 1)
+
+    assert [c.args[0] for c in download.await_args_list] == ["https://a", "https://b"]
+    assert download.await_args_list[0].kwargs["max_resolution"] == 720
+    texts = [c.kwargs["text"] for c in app.bot.send_message.call_args_list]
+    assert any("Resuming your task" in t and "https://a" in t for t in texts)
+    assert any("Bot restarted. Your task is queued at position 1" in t for t in texts)
+    assert await list_pending_tasks(db) == []
     assert slot_mgr.active_count == 0
 
 
 @pytest.mark.asyncio
-async def test_pipeline_rejects_oversized_file():
+async def test_restore_does_not_rerun_interrupted_running_task(db):
+    await _add_pending(db, "https://was-running", running=True)
     slot_mgr = DownloadSlotManager()
-    bot = AsyncMock()
-    get_setting_fn = await _make_get_setting({"max_file_size_mb": "50"})
-    mock_result = {
-        "file_path": "/tmp/test.mp4", "tmp_dir": "/tmp/testdir",
-        "duration": 10, "width": 1920, "height": 1080, "file_size_mb": 100.0,
-    }
-    with patch("bot.services.pipeline.get_db", new_callable=AsyncMock), \
-         patch("bot.services.pipeline.get_setting", side_effect=get_setting_fn), \
-         patch("bot.services.pipeline.check_disk_space", return_value=(True, 5000)), \
-         patch("bot.services.pipeline.create_post_log", new_callable=AsyncMock, return_value=1), \
-         patch("bot.services.pipeline.update_post_log_status", new_callable=AsyncMock), \
-         patch("bot.services.pipeline.download_video", new_callable=AsyncMock, return_value=mock_result), \
-         patch("shutil.rmtree"):
-        await download_and_publish(
-            bot=bot, slot_manager=slot_mgr, user_chat_id=111, user_id=111,
-            source_url="https://x.com/u/status/1", caption="test", channel_chat_id=-100123,
-        )
-    assert "too large" in str(bot.send_message.call_args).lower()
+    app = _fake_application(slot_mgr)
+    download = AsyncMock(return_value=_RESULT)
+    with ExitStack() as stack:
+        for p in _patches(download=download):
+            stack.enter_context(p)
+        assert await restore_pending_tasks(app) == 0
+
+    download.assert_not_awaited()
+    text = app.bot.send_message.call_args.kwargs["text"]
+    assert "interrupted" in text and "https://was-running" in text
+    assert await list_pending_tasks(db) == []
 
 
 @pytest.mark.asyncio
-async def test_pipeline_success_path():
+async def test_restore_survives_notification_failure(db):
+    await _add_pending(db, "https://was-running", running=True)
+    await _add_pending(db, "https://queued")
     slot_mgr = DownloadSlotManager()
-    bot = AsyncMock()
-    get_setting_fn = await _make_get_setting()
-    mock_result = {
-        "file_path": "/tmp/test.mp4", "tmp_dir": "/tmp/testdir",
-        "duration": 10, "width": 1920, "height": 1080, "file_size_mb": 25.0,
-    }
-    with patch("bot.services.pipeline.get_db", new_callable=AsyncMock), \
-         patch("bot.services.pipeline.get_setting", side_effect=get_setting_fn), \
-         patch("bot.services.pipeline.check_disk_space", return_value=(True, 5000)), \
-         patch("bot.services.pipeline.create_post_log", new_callable=AsyncMock, return_value=1), \
-         patch("bot.services.pipeline.update_post_log_status", new_callable=AsyncMock), \
-         patch("bot.services.pipeline.download_video", new_callable=AsyncMock, return_value=mock_result), \
-         patch("bot.services.pipeline.publish_video", new_callable=AsyncMock, return_value=999), \
-         patch("shutil.rmtree"):
-        await download_and_publish(
-            bot=bot, slot_manager=slot_mgr, user_chat_id=111, user_id=111,
-            source_url="https://x.com/u/status/1", caption="test", channel_chat_id=-100123,
-        )
-    assert "success" in str(bot.send_message.call_args).lower()
-    assert slot_mgr.active_count == 0
-
-
-@pytest.mark.asyncio
-async def test_pipeline_download_failure():
-    slot_mgr = DownloadSlotManager()
-    bot = AsyncMock()
-    get_setting_fn = await _make_get_setting()
-    with patch("bot.services.pipeline.get_db", new_callable=AsyncMock), \
-         patch("bot.services.pipeline.get_setting", side_effect=get_setting_fn), \
-         patch("bot.services.pipeline.check_disk_space", return_value=(True, 5000)), \
-         patch("bot.services.pipeline.create_post_log", new_callable=AsyncMock, return_value=1), \
-         patch("bot.services.pipeline.update_post_log_status", new_callable=AsyncMock), \
-         patch("bot.services.pipeline.download_video", new_callable=AsyncMock, side_effect=RuntimeError("yt-dlp error")):
-        await download_and_publish(
-            bot=bot, slot_manager=slot_mgr, user_chat_id=111, user_id=111,
-            source_url="https://x.com/u/status/1", caption="test", channel_chat_id=-100123,
-        )
-    assert "failed" in str(bot.send_message.call_args).lower()
-    assert slot_mgr.active_count == 0
+    app = _fake_application(slot_mgr)
+    # 第一条通知（中断提醒）失败，后面的任务仍要恢复
+    app.bot.send_message.side_effect = [RuntimeError("blocked"), None, None]
+    with ExitStack() as stack:
+        for p in _patches():
+            stack.enter_context(p)
+        assert await restore_pending_tasks(app) == 1
+        await asyncio.wait_for(asyncio.gather(*app.tasks), 1)
+    assert await list_pending_tasks(db) == []

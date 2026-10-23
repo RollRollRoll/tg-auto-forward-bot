@@ -30,11 +30,14 @@ class DownloadSlotManager:
     def queued_count(self) -> int:
         return len(self._queue)
 
-    async def enqueue(self, max_slots: int, *, url: str = "", user_id: int = 0) -> tuple[int, int] | None:
+    async def enqueue(
+        self, max_slots: int, *, task_id: int | None = None, url: str = "", user_id: int = 0,
+    ) -> tuple[int, int] | None:
         """登记一个任务，返回 (task_id, 排队位置)。
 
         有空闲槽位时直接占用，位置为 0；否则进入队列，位置从 1 开始，
         之后需要调用 wait_for_slot() 等待轮到自己。已关闭时返回 None。
+        task_id 可由调用方指定（如数据库里 pending_tasks 的行 ID），不指定则自动分配。
         """
         async with self._lock:
             if self._closed:
@@ -42,8 +45,13 @@ class DownloadSlotManager:
             # 每次登记都以最新的并发设置为准；设置调大后可以立刻放行排队任务
             self._max_slots = max_slots
             self._promote()
-            self._next_id += 1
-            task_id = self._next_id
+            if task_id is None:
+                self._next_id += 1
+                task_id = self._next_id
+            elif task_id in self._tasks or task_id in self._queue:
+                raise ValueError(f"Task {task_id} is already registered")
+            else:
+                self._next_id = max(self._next_id, task_id)
             info = {
                 "url": url,
                 "user_id": user_id,

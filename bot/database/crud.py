@@ -94,3 +94,40 @@ async def list_recent_post_logs(db: aiosqlite.Connection, *, limit: int = 5) -> 
         (limit,),
     )
     return [dict(row) for row in await cursor.fetchall()]
+
+
+async def fail_interrupted_post_logs(db: aiosqlite.Connection) -> int:
+    # 启动时调用：上次退出时还停在下载或发布阶段的记录，标记为失败
+    cursor = await db.execute(
+        "UPDATE post_logs SET status = 'failed', error_message = 'Interrupted by restart', updated_at = CURRENT_TIMESTAMP "
+        "WHERE status IN ('downloading', 'publishing')"
+    )
+    await db.commit()
+    return cursor.rowcount
+
+
+async def create_pending_task(db: aiosqlite.Connection, *, user_id: int, user_chat_id: int, source_url: str, caption: str, channel_chat_id: int, max_resolution: int) -> int:
+    cursor = await db.execute(
+        "INSERT INTO pending_tasks (user_id, user_chat_id, source_url, caption, channel_chat_id, max_resolution) VALUES (?, ?, ?, ?, ?, ?)",
+        (user_id, user_chat_id, source_url, caption, channel_chat_id, max_resolution),
+    )
+    await db.commit()
+    return cursor.lastrowid
+
+
+async def list_pending_tasks(db: aiosqlite.Connection) -> list[dict]:
+    cursor = await db.execute(
+        "SELECT id, user_id, user_chat_id, source_url, caption, channel_chat_id, max_resolution, status "
+        "FROM pending_tasks ORDER BY id"
+    )
+    return [dict(row) for row in await cursor.fetchall()]
+
+
+async def mark_pending_task_running(db: aiosqlite.Connection, task_id: int) -> None:
+    await db.execute("UPDATE pending_tasks SET status = 'running' WHERE id = ?", (task_id,))
+    await db.commit()
+
+
+async def delete_pending_task(db: aiosqlite.Connection, task_id: int) -> None:
+    await db.execute("DELETE FROM pending_tasks WHERE id = ?", (task_id,))
+    await db.commit()

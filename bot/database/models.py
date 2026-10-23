@@ -44,6 +44,20 @@ async def create_tables(db: aiosqlite.Connection) -> None:
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
+    # 已提交但尚未完成的任务，重启后据此恢复队列。status: queued / running
+    await db.execute("""
+        CREATE TABLE IF NOT EXISTS pending_tasks (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id BIGINT NOT NULL,
+            user_chat_id BIGINT NOT NULL,
+            source_url TEXT NOT NULL,
+            caption TEXT NOT NULL DEFAULT '',
+            channel_chat_id BIGINT NOT NULL,
+            max_resolution INTEGER NOT NULL,
+            status TEXT NOT NULL DEFAULT 'queued',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
     # Insert default settings (skip if already exist)
     for key, value in _DEFAULT_SETTINGS.items():
         await db.execute(

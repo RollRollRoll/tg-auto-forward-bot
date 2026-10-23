@@ -19,7 +19,7 @@
 - **失败降级**：Telegram 不接受视频格式时，自动改为以文件形式发送
 - **Cookies 支持**：需要登录的站点（如 X/Twitter）可配置 `cookies.txt`
 - **自动维护**：容器每次启动时升级 yt-dlp；启动时清理超过 1 小时的残留下载文件
-- **SQLite 存储**：管理员、频道、设置和发布记录都放在一个文件里
+- **SQLite 存储**：管理员、频道、设置、发布记录和下载队列都放在一个文件里，排队中的任务重启后不会丢
 
 ## 工作原理
 
@@ -233,7 +233,8 @@ docker compose up -d
 | Bot 完全没有回应 | 你不是管理员，或者是在群里发的。请用 `SUPER_ADMIN_ID` 对应的账号私聊 Bot |
 | `Insufficient disk space` | 剩余空间不足 `max_concurrent_downloads × max_file_size_mb × 2` MB。清理磁盘或调低这两项 |
 | `Your task is queued at position n` | 槽位已满，不需要操作，轮到时会自动开始。想同时跑更多任务，可以调大 `max_concurrent_downloads` |
-| `Bot is restarting, the queued task was cancelled` | 任务还在排队时 Bot 被停止或重启了。队列只保存在内存里，需要重新发送链接 |
+| `Bot is restarting. Your task is saved...` | 任务还在排队时 Bot 被停止了。不需要操作：排队任务保存在 SQLite 里，重启后按原来的顺序继续 |
+| `Your task was interrupted by a bot restart...` | 任务正在下载或上传时 Bot 被停止了。这种任务不会自动重试，因为 Bot 无法确认视频是否已经发到频道。按消息里的链接重新发送即可 |
 | `No video found at this URL` | 站点不支持、帖子里没有视频，或需要登录。可以试试配置 [Cookies](#cookies-配置需要登录的站点) |
 | `Bad guest token` / 403 | 配置或更新 `cookies.txt` |
 | `Bot is not an admin of this channel...` | 把 Bot 设为频道管理员并开启"发布消息"权限，再执行 `/add_channel` |
@@ -247,7 +248,6 @@ pip install -r requirements-dev.txt
 pytest
 ```
 
-目录结构：
 ### 依赖管理
 
 直接依赖声明在 `requirements.in`（运行时）和 `requirements-dev.in`（测试）里。`requirements.txt` 和 `requirements-dev.txt` 是用 [uv](https://github.com/astral-sh/uv) 生成的锁文件，固定了包括间接依赖在内的所有包版本。不要手动修改锁文件。改了 `.in` 文件后，重新生成两个锁文件：
@@ -259,6 +259,7 @@ uv pip compile requirements-dev.in -o requirements-dev.txt --universal --python-
 
 开发锁文件受 `requirements.txt` 约束，所以两边共有的包在测试和生产环境里版本始终一致。
 
+目录结构：
 
 ```text
 bot/

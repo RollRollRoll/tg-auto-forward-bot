@@ -6,7 +6,7 @@ from telegram.ext import Application, ApplicationBuilder, CallbackQueryHandler, 
 
 from bot.config import API_BASE_URL, BOT_TOKEN, DOWNLOAD_DIR, SUPER_ADMIN_ID
 from bot.database.connection import close_db, init_db
-from bot.database.crud import add_admin, is_admin
+from bot.database.crud import add_admin, fail_interrupted_post_logs, is_admin
 from bot.database.models import create_tables
 from bot.handlers.admin import (
     add_admin_handler, add_channel_handler, get_setting_handler,
@@ -18,15 +18,28 @@ from bot.handlers.conversation import build_conversation_handler
 from bot.handlers.menu import menu_callback_handler
 from bot.handlers.start import help_handler, start_handler
 from bot.services.downloader import DownloadSlotManager, cleanup_stale_files
+from bot.services.pipeline import restore_pending_tasks
 
 logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
 class BotApplication(Application):
+    async def start(self) -> None:
+        await super().start()
+        # 必须在 start() 之后恢复：此时 create_task 创建的任务才会被 stop() 等待
+        try:
+            restored = await restore_pending_tasks(self)
+        except Exception:
+            # 恢复失败不影响 Bot 启动，未恢复的记录留在 pending_tasks 里，下次启动再试
+            logger.exception("Failed to restore pending download tasks")
+            return
+        if restored:
+            logger.info("Restored %d pending download tasks", restored)
+
     async def stop(self) -> None:
-        # stop() 会等待所有 create_task 任务结束；先取消排队中的任务，
-        # 否则重启时要等整个队列下载完才能退出
+        # stop() 会等待所有 create_task 任务结束；先让排队中的任务退出，
+        # 否则重启时要等整个队列下载完才能退出。它们仍保存在 pending_tasks 里，下次启动时恢复
         slot_manager = self.bot_data.get("slot_manager")
         if slot_manager is not None:
             slot_manager.close()
@@ -40,6 +53,9 @@ async def post_init(application) -> None:
     await init_db(db_path)
     db = await get_db()
     await create_tables(db)
+    interrupted = await fail_interrupted_post_logs(db)
+    if interrupted:
+        logger.info("Marked %d interrupted post logs as failed", interrupted)
     if not await is_admin(db, user_id=SUPER_ADMIN_ID):
         await add_admin(db, user_id=SUPER_ADMIN_ID, username="super_admin")
         logger.info("Super admin %d added to database", SUPER_ADMIN_ID)

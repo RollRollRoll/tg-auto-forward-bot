@@ -4,7 +4,8 @@ from bot.database.crud import (
     add_admin, remove_admin, list_admins, is_admin,
     add_channel, remove_channel, list_channels,
     get_setting, set_setting, get_all_settings,
-    create_post_log, update_post_log_status,
+    create_post_log, update_post_log_status, fail_interrupted_post_logs,
+    create_pending_task, list_pending_tasks, mark_pending_task_running, delete_pending_task,
 )
 
 @pytest.mark.asyncio
@@ -18,6 +19,7 @@ async def test_tables_created(db):
     assert "channels" in tables
     assert "post_logs" in tables
     assert "settings" in tables
+    assert "pending_tasks" in tables
 
 @pytest.mark.asyncio
 async def test_default_settings_inserted(db):
@@ -165,3 +167,37 @@ async def test_update_post_log_failed(db):
     row = await cursor.fetchone()
     assert row["status"] == "failed"
     assert row["error_message"] == "Download timeout"
+
+
+@pytest.mark.asyncio
+async def test_fail_interrupted_post_logs(db):
+    ids = []
+    for _ in range(3):
+        ids.append(await create_post_log(db, admin_user_id=1, source_url="https://a", channel_chat_id=-1, caption=""))
+    await update_post_log_status(db, ids[1], status="publishing")
+    await update_post_log_status(db, ids[2], status="done", message_id=5)
+    assert await fail_interrupted_post_logs(db) == 2
+    cursor = await db.execute("SELECT status, error_message FROM post_logs ORDER BY id")
+    rows = [tuple(r) for r in await cursor.fetchall()]
+    assert rows == [
+        ("failed", "Interrupted by restart"),
+        ("failed", "Interrupted by restart"),
+        ("done", None),
+    ]
+
+# --- Pending Tasks ---
+
+@pytest.mark.asyncio
+async def test_pending_task_lifecycle(db):
+    t1 = await create_pending_task(db, user_id=1, user_chat_id=10, source_url="https://a", caption="<b>x</b>", channel_chat_id=-100, max_resolution=720)
+    t2 = await create_pending_task(db, user_id=2, user_chat_id=20, source_url="https://b", caption="", channel_chat_id=-200, max_resolution=1080)
+    rows = await list_pending_tasks(db)
+    assert [r["id"] for r in rows] == [t1, t2]
+    assert rows[0] == {
+        "id": t1, "user_id": 1, "user_chat_id": 10, "source_url": "https://a", "caption": "<b>x</b>",
+        "channel_chat_id": -100, "max_resolution": 720, "status": "queued",
+    }
+    await mark_pending_task_running(db, t1)
+    assert [r["status"] for r in await list_pending_tasks(db)] == ["running", "queued"]
+    await delete_pending_task(db, t1)
+    assert [r["id"] for r in await list_pending_tasks(db)] == [t2]
