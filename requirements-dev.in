@@ -1,0 +1,5 @@
+# 开发依赖：包含全部运行时依赖，版本受 requirements.txt 约束，保证与运行环境一致
+-r requirements.in
+-c requirements.txt
+pytest==9.1.1
+pytest-asyncio==1.4.0

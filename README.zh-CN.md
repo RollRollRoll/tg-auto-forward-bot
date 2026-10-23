@@ -163,7 +163,7 @@ docker compose logs bot | head -5
 
 升级需要能访问 PyPI。升级失败时，Bot 仍会用镜像里已有的版本启动。
 
-`requirements.txt` 里的依赖都固定了精确版本。其中 yt-dlp 的版本只是打进镜像的基线，容器运行时用的是最新版。如果想让 yt-dlp 也固定不变，删掉 `entrypoint.sh` 里的 `pip install` 那一行即可。
+所有依赖（包括间接依赖）都锁定在 `requirements.txt` 里（见[依赖管理](#依赖管理)）。其中 yt-dlp 的版本只是打进镜像的基线，容器运行时用的是最新版。如果想让 yt-dlp 也固定不变，删掉 `entrypoint.sh` 里的 `pip install` 那一行即可。
 
 ## 远程服务器部署
 
@@ -248,6 +248,17 @@ pytest
 ```
 
 目录结构：
+### 依赖管理
+
+直接依赖声明在 `requirements.in`（运行时）和 `requirements-dev.in`（测试）里。`requirements.txt` 和 `requirements-dev.txt` 是用 [uv](https://github.com/astral-sh/uv) 生成的锁文件，固定了包括间接依赖在内的所有包版本。不要手动修改锁文件。改了 `.in` 文件后，重新生成两个锁文件：
+
+```bash
+uv pip compile requirements.in -o requirements.txt --universal --python-version 3.11
+uv pip compile requirements-dev.in -o requirements-dev.txt --universal --python-version 3.11
+```
+
+开发锁文件受 `requirements.txt` 约束，所以两边共有的包在测试和生产环境里版本始终一致。
+
 
 ```text
 bot/

@@ -1,0 +1,6 @@
+python-telegram-bot[ext]==22.8
+# 镜像内的基线版本；容器启动时 entrypoint.sh 会再升级到最新版
+yt-dlp==2026.10.21
+aiosqlite==0.22.1
+python-dotenv==1.2.4
+httpx==0.28.1
