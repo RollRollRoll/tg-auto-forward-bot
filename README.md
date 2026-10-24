@@ -41,6 +41,7 @@ The bot writes downloads to a directory shared with the Local Bot API Server, wh
 - `api_id` and `api_hash` from [my.telegram.org](https://my.telegram.org) (required by the Local Bot API Server)
 - Your numeric Telegram user ID, e.g. from [@userinfobot](https://t.me/userinfobot)
 - Docker with the Compose plugin, **or** Python 3.11+, ffmpeg and a separately running Local Bot API Server
+- The Local Bot API Server must support Bot API 10.3 or later. The private chat cards use Telegram Rich Messages; Docker Compose pins `aiogram/telegram-bot-api:10.3`. On an older server the bot falls back to plain HTML messages.
 - Enough free disk space. Before each task the bot requires `max_concurrent_downloads × max_file_size_mb × 2` MB free in the download directory. With the defaults that is **8000 MB**; lower the settings on small disks (see [Settings](#settings)).
 
 ## Quick Start (Docker)
@@ -99,12 +100,13 @@ Environment variables are read from the process environment or a `.env` file (`b
 All interaction happens in a **private chat** with the bot. Messages in groups and channels are ignored, and so are messages from users who are not admins.
 
 1. Send a message containing a video link.
-2. Reply with a caption (HTML allowed), or send `/skip` to post without one.
+2. Reply with a caption (HTML allowed), or tap **Skip caption** (or send `/skip`) to post without one.
 3. Pick a resolution. Only resolutions up to `max_resolution` are offered; if just one remains, this step is skipped.
 4. Pick the target channel. If only one channel is configured, it is used automatically.
-5. The bot replies "Task accepted", downloads in the background and reports success or failure. If all download slots are busy, it tells you your queue position and starts the task automatically when a slot frees up. Check progress any time with `/tasks`.
+5. Check the summary card and tap **Confirm**. **Edit** lets you change the caption, resolution or channel first; **Cancel** drops the task.
+6. The bot posts one status message for the task and keeps it up to date: queue position, download progress (speed and ETA), converting, uploading. When the task ends the message shows the result, with an **Open post** button on success, and the bot sends a short message so your phone gets a notification. `/tasks` still shows all active and recent tasks.
 
-Send `/cancel` at any step to abort.
+Tap **Cancel** or send `/cancel` at any step to abort. Sending a new link while choosing a resolution or channel, or on the summary card, starts over with the new link. Buttons on old messages (after the task was submitted or cancelled, or after a bot restart) only show "This action has expired".
 
 ## Bot Commands
 

@@ -1,95 +1,76 @@
 from __future__ import annotations
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import Update
 from telegram.ext import ContextTypes
 
 from bot.config import SUPER_ADMIN_ID
-from bot.handlers.admin import (
-    format_admins_text,
-    format_channels_text,
-    format_settings_text,
-    format_tasks_text,
-)
+from bot.database.connection import get_db
+from bot.database.crud import set_setting
 from bot.handlers.filters import admin_only, private_chat_only
-from bot.handlers.start import HELP_TEXT
-
-MENU_GREETING = "<b>Video Forward Bot</b>\n\nSelect an option:"
-
-
-def build_main_keyboard(user_id: int) -> InlineKeyboardMarkup:
-    rows = [
-        [
-            InlineKeyboardButton("\U0001f4cb Tasks", callback_data="menu:tasks"),
-            InlineKeyboardButton("\U0001f4e2 Channels", callback_data="menu:channels"),
-        ],
-    ]
-    if user_id == SUPER_ADMIN_ID:
-        rows.append([
-            InlineKeyboardButton("\u2699\ufe0f Settings", callback_data="menu:settings"),
-            InlineKeyboardButton("\U0001f464 Admins", callback_data="menu:admins"),
-        ])
-    else:
-        rows.append([
-            InlineKeyboardButton("\u2699\ufe0f Settings", callback_data="menu:settings"),
-        ])
-    rows.append([
-        InlineKeyboardButton("\u2753 Help", callback_data="menu:help"),
-        InlineKeyboardButton("\u2716 Close", callback_data="menu:close"),
-    ])
-    return InlineKeyboardMarkup(rows)
+from bot.ui.pages import (
+    SETTING_PRESETS, admins_page, back_keyboard, channels_page, help_page, main_menu,
+    setting_presets_page, settings_page, tasks_page,
+)
+from bot.ui.sender import RichSender, SentMessage
 
 
-def _back_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("\u00ab Back", callback_data="menu:back")]
-    ])
+async def _show(update: Update, context, card) -> None:
+    # 按菜单消息原来的格式原地编辑
+    await RichSender(context.bot).edit(SentMessage.of(update.callback_query.message), card)
 
 
 @private_chat_only
 @admin_only
 async def menu_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
     action = query.data.removeprefix("menu:")
     user_id = update.effective_user.id
 
-    if action == "back":
-        await query.edit_message_text(
-            MENU_GREETING,
-            reply_markup=build_main_keyboard(user_id),
-            parse_mode="HTML",
-        )
-
-    elif action == "tasks":
-        text = await format_tasks_text(context.bot_data["task_queue"])
-        await query.edit_message_text(
-            text, reply_markup=_back_keyboard(), parse_mode="HTML",
-        )
-
-    elif action == "channels":
-        text = await format_channels_text()
-        await query.edit_message_text(
-            text, reply_markup=_back_keyboard(), parse_mode="HTML",
-        )
-
-    elif action == "settings":
-        text = await format_settings_text()
-        await query.edit_message_text(
-            text, reply_markup=_back_keyboard(), parse_mode="HTML",
-        )
-
-    elif action == "admins":
-        if user_id != SUPER_ADMIN_ID:
-            return
-        text = await format_admins_text()
-        await query.edit_message_text(
-            text, reply_markup=_back_keyboard(), parse_mode="HTML",
-        )
-
-    elif action == "help":
-        await query.edit_message_text(
-            HELP_TEXT, reply_markup=_back_keyboard(), parse_mode="HTML",
-        )
-
-    elif action == "close":
+    if action == "admins" and user_id != SUPER_ADMIN_ID:
+        await query.answer()
+        return
+    if action == "close":
+        await query.answer()
         await query.delete_message()
+        return
+
+    await query.answer()
+    match action:
+        case "back":
+            card = main_menu(user_id)
+        case "tasks":
+            card = await tasks_page(context.bot_data["task_queue"], back_keyboard())
+        case "channels":
+            card = await channels_page(back_keyboard())
+        case "settings":
+            card = await settings_page(with_buttons=True)
+        case "admins":
+            card = await admins_page(back_keyboard())
+        case "help":
+            card = help_page(back_keyboard())
+        case _:
+            return
+    await _show(update, context, card)
+
+
+@private_chat_only
+@admin_only
+async def settings_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Settings 页的按钮：set:<key> 打开预设页，set:<key>:<value> 写入设置后回到 Settings 页。"""
+    query = update.callback_query
+    _, key, *rest = query.data.split(":", 2)
+    if key not in SETTING_PRESETS:
+        await query.answer()
+        return
+    if not rest:
+        await query.answer()
+        await _show(update, context, await setting_presets_page(key))
+        return
+    try:
+        # 和 /set 走同一个校验，防止伪造的 callback_data 写入非法值
+        await set_setting(await get_db(), key, rest[0])
+    except ValueError as e:
+        await query.answer(str(e), show_alert=True)
+        return
+    await query.answer(f"{key} = {rest[0]}")
+    await _show(update, context, await settings_page(with_buttons=True))

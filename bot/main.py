@@ -14,12 +14,13 @@ from bot.handlers.admin import (
     remove_channel_handler, set_setting_handler, settings_handler,
     tasks_handler,
 )
-from bot.handlers.conversation import build_conversation_handler
-from bot.handlers.menu import menu_callback_handler
+from bot.handlers.conversation import BUTTON_PATTERN, build_conversation_handler, expired_button_handler
+from bot.handlers.menu import menu_callback_handler, settings_callback_handler
 from bot.handlers.start import help_handler, start_handler
 from bot.services.downloader import cleanup_stale_files
 from bot.services.pipeline import restore_pending_tasks
 from bot.services.task_queue import SqliteTaskStore, TaskQueue
+from bot.ui.status import ChatEditLimiter
 
 logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
 # httpx 的 INFO 日志会打印完整请求 URL，其中包含 bot token，调高级别避免泄露
@@ -58,6 +59,8 @@ async def post_init(application) -> None:
     await create_tables(db)
     # 依赖数据库连接，所以在这里而不是 build 时创建
     application.bot_data["task_queue"] = TaskQueue(SqliteTaskStore(db))
+    # 所有 status message 共用一个限速器，保证同一个聊天的编辑间隔
+    application.bot_data["status_limiter"] = ChatEditLimiter()
     interrupted = await fail_interrupted_post_logs(db)
     if interrupted:
         logger.info("Marked %d interrupted post logs as failed", interrupted)
@@ -117,6 +120,9 @@ def main() -> None:
     app.add_handler(CommandHandler("settings", settings_handler))
     app.add_handler(CommandHandler("tasks", tasks_handler))
     app.add_handler(CallbackQueryHandler(menu_callback_handler, pattern=r"^menu:"))
+    app.add_handler(CallbackQueryHandler(settings_callback_handler, pattern=r"^set:"))
+    # 不属于任何进行中会话的流程按钮（已提交、已取消或 Bot 重启过），统一提示过期
+    app.add_handler(CallbackQueryHandler(expired_button_handler, pattern=BUTTON_PATTERN))
     logger.info("Starting bot polling...")
     app.run_polling()
 

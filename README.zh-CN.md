@@ -41,6 +41,7 @@ Bot 把视频下载到和 Local Bot API Server 共享的目录，API Server 直�
 - 从 [my.telegram.org](https://my.telegram.org) 获取 `api_id` 和 `api_hash`（Local Bot API Server 需要）
 - 你的 Telegram 数字用户 ID，可通过 [@userinfobot](https://t.me/userinfobot) 查询
 - 安装了 Compose 插件的 Docker；**或者** Python 3.11+、ffmpeg，外加一个单独运行的 Local Bot API Server
+- Local Bot API Server 需要支持 Bot API 10.3 及以上。私聊里的卡片用的是 Telegram Rich Messages，Docker Compose 固定使用 `aiogram/telegram-bot-api:10.3`；服务器版本太旧时，Bot 会退回普通 HTML 消息
 - 足够的磁盘空间。每个任务开始前，Bot 要求下载目录剩余空间不少于 `max_concurrent_downloads × max_file_size_mb × 2` MB。默认配置下是 **8000 MB**，磁盘小的话请调低这两项（见[设置项](#设置项)）
 
 ## 快速开始（Docker）
@@ -99,12 +100,13 @@ python -m bot.main
 所有操作都在与 Bot 的**私聊**中进行。群组和频道里的消息、非管理员发来的消息都会被忽略。
 
 1. 发送一条包含视频链接的消息。
-2. 回复文案（支持 HTML），或发送 `/skip` 不带文案。
+2. 回复文案（支持 HTML），或点 **Skip caption**（也可以发 `/skip`）不带文案。
 3. 选择分辨率。只会列出不超过 `max_resolution` 的分辨率；如果只剩一种，这一步会自动跳过。
 4. 选择目标频道。如果只配置了一个频道，会自动使用它。
-5. Bot 回复 "Task accepted" 后在后台下载，完成后告诉你成功或失败。如果下载槽位全满，Bot 会告诉你排在第几位，等有空闲槽位时自动开始。随时可以用 `/tasks` 查看进度。
+5. 核对确认卡片后点 **Confirm**。点 **Edit** 可以先修改文案、分辨率或频道，点 **Cancel** 放弃这个任务。
+6. Bot 为这个任务发一条状态消息并持续更新：排队位置、下载进度（速度和剩余时间）、转换、上传。任务结束时，这条消息会显示结果，发布成功会带一个 **Open post** 按钮；Bot 还会另发一条短消息，让手机收到通知。`/tasks` 仍然可以查看所有进行中和最近的任务。
 
-任意步骤发送 `/cancel` 可以取消。
+任意步骤点 **Cancel** 或发送 `/cancel` 可以取消。在选择分辨率、选择频道或确认卡片这几步发来新链接，会用新链接重新开始。旧消息上的按钮（任务已提交、已取消，或 Bot 重启过）点了只会提示 "This action has expired"。
 
 ## Bot 命令
 

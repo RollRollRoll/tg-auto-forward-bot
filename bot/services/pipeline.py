@@ -1,4 +1,5 @@
 from __future__ import annotations
+import asyncio
 import logging
 import shutil
 from dataclasses import dataclass
@@ -6,10 +7,13 @@ from dataclasses import dataclass
 from telegram import Bot
 
 from bot.database.connection import get_db
-from bot.database.crud import create_post_log, get_setting, update_post_log_status
+from bot.database.crud import create_post_log, get_setting, list_channels, update_post_log_status
 from bot.services.downloader import check_disk_space, download_video
 from bot.services.publisher import publish_video
 from bot.services.task_queue import Task, Ticket, TaskQueue
+from bot.ui.markup import post_link
+from bot.ui.sender import RichSender
+from bot.ui.status import ChatEditLimiter, StatusReporter
 
 logger = logging.getLogger(__name__)
 
@@ -69,13 +73,16 @@ async def _read_limits(db) -> tuple[int, int]:
     return max_concurrent, max_file_size
 
 
-async def download_and_publish(*, bot: Bot, task_queue: TaskQueue, task: Task) -> None:
+async def download_and_publish(
+    *, bot: Bot, task_queue: TaskQueue, task: Task, limiter: ChatEditLimiter,
+) -> None:
     db = await get_db()
     max_concurrent, max_file_size = await _read_limits(db)
     ticket = await task_queue.submit(task, max_slots=max_concurrent)
     await _process(
         bot=bot, db=db, task_queue=task_queue, ticket=ticket, task=task,
         max_concurrent=max_concurrent, max_file_size=max_file_size,
+        limiter=limiter,
     )
 
 
@@ -99,68 +106,97 @@ async def restore_pending_tasks(application) -> int:
         except Exception:
             logger.warning("Failed to notify user %d about interrupted task %s", task.user_chat_id, task.source_url)
 
+    limiter = application.bot_data["status_limiter"]
     for task, ticket in resumed:
         application.create_task(_process(
             bot=bot, db=db, task_queue=task_queue, ticket=ticket, task=task,
-            max_concurrent=max_concurrent, max_file_size=max_file_size, restored=True,
+            max_concurrent=max_concurrent, max_file_size=max_file_size, limiter=limiter, restored=True,
         ))
     return len(resumed)
 
 
+async def _channel_info(bot: Bot, db, chat_id: int) -> tuple[str, str | None]:
+    """返回 (频道标题, username)。username 用来拼帖子链接，取不到时按私有频道处理。"""
+    title = next((ch["title"] for ch in await list_channels(db) if ch["chat_id"] == chat_id), None)
+    username = None
+    try:
+        chat = await bot.get_chat(chat_id)
+        username = getattr(chat, "username", None)
+        title = title or getattr(chat, "title", None)
+    except Exception:
+        logger.warning("Failed to get chat info for channel %d", chat_id)
+    return title or str(chat_id), username
+
+
 async def _process(
     *, bot: Bot, db, task_queue: TaskQueue, ticket: Ticket, task: Task,
-    max_concurrent: int, max_file_size: int, restored: bool = False,
+    max_concurrent: int, max_file_size: int, limiter: ChatEditLimiter, restored: bool = False,
 ) -> None:
     user_chat_id = task.user_chat_id
+    if ticket.closed:
+        # 提交时已在关闭：记录已落库，重启后恢复
+        await bot.send_message(chat_id=user_chat_id, text=_SAVED_FOR_RESTART)
+        return
 
-    async def notify_queued(t: Ticket) -> None:
-        prefix = "Bot restarted. " if restored else f"All {max_concurrent} download slots are busy. "
-        await bot.send_message(
-            chat_id=user_chat_id,
-            text=f"{prefix}Your task is queued at position {t.position} and will start automatically.",
-        )
+    channel_title, channel_username = await _channel_info(bot, db, task.channel_chat_id)
+    status = StatusReporter(
+        RichSender(bot), limiter, chat_id=user_chat_id, url=task.source_url,
+        channel_title=channel_title, resolution=task.max_resolution, restored=restored,
+    )
+    status.start(ticket.position)
 
-    # 排队通知放进 slot() 里发：发送失败时 slot 和 pending 记录由 TaskQueue 统一清理
-    async with task_queue.slot(ticket, on_queued=notify_queued) as ok:
+    async with task_queue.slot(ticket, on_position_changed=status.position_changed) as ok:
         if not ok:
             # 正在关闭：pending 记录保留，重启后恢复
+            await status.wait_idle()
             await bot.send_message(chat_id=user_chat_id, text=_SAVED_FOR_RESTART)
             return
-        if restored and ticket.position == 0:
-            await bot.send_message(chat_id=user_chat_id, text=f"Bot restarted. Resuming your task:\n{task.source_url}")
+        status.running()
         outcome = await execute_task(
             bot=bot, db=db, task_queue=task_queue, task_id=ticket.task_id, task=task,
-            max_concurrent=max_concurrent, max_file_size=max_file_size,
+            max_concurrent=max_concurrent, max_file_size=max_file_size, status=status,
         )
-        await _notify(bot, user_chat_id, outcome_message(outcome))
 
-
-async def _notify(bot: Bot, chat_id: int, text: str) -> None:
-    # 结果通知发不出去（如用户屏蔽了 bot）时只记日志：post log 已是最终状态，不能因此改写
-    try:
-        await bot.send_message(chat_id=chat_id, text=text)
-    except Exception:
-        logger.warning("Failed to notify user %d: %s", chat_id, text)
+    # 结果通知发不出去（如用户屏蔽了 bot）时只记日志：post log 已是最终状态，不受影响
+    if isinstance(outcome, Published):
+        url = post_link(task.channel_chat_id, channel_username, outcome.message_id)
+        await status.finished(success=True, post_url=url)
+    else:
+        await status.finished(success=False, detail=outcome_message(outcome))
 
 
 async def execute_task(
     *, bot: Bot, db, task_queue: TaskQueue, task_id: int, task: Task,
-    max_concurrent: int, max_file_size: int,
+    max_concurrent: int, max_file_size: int, status: StatusReporter | None = None,
 ) -> Outcome:
-    """下载并发布一个 Task，过程中更新 post log，返回最终结果。不发用户通知，也不向外抛异常。"""
+    """下载并发布一个 Task，过程中更新 post log 和 status message，返回最终结果。不向外抛异常。"""
     # 拿到槽位后再检查磁盘：排队期间剩余空间可能已经变化
     has_space, _ = check_disk_space(max_concurrent, max_file_size)
     if not has_space:
         return NoDiskSpace()
 
-    def _progress_hook(d: dict) -> None:
+    loop = asyncio.get_running_loop()
+
+    def _report(d: dict, total: float) -> None:
+        # 在事件循环里执行：StatusReporter 不是线程安全的
         if d.get("status") == "downloading":
-            total = d.get("total_bytes") or d.get("total_bytes_estimate") or 0
+            status.downloading()
+            status.progress(downloaded=d.get("downloaded_bytes", 0), total=total or None,
+                            speed=d.get("speed"), eta=d.get("eta"))
+        elif d.get("status") == "finished":
+            status.converting()
+
+    def _progress_hook(d: dict) -> None:
+        # yt-dlp 在下载线程里调用
+        total = d.get("total_bytes") or d.get("total_bytes_estimate") or 0
+        if d.get("status") == "downloading":
             downloaded = d.get("downloaded_bytes", 0)
             pct = (downloaded / total * 100) if total > 0 else 0.0
             task_queue.update_progress(task_id, pct, "downloading")
         elif d.get("status") == "finished":
             task_queue.update_progress(task_id, 100.0, "processing")
+        if status is not None:
+            loop.call_soon_threadsafe(_report, d, total)
 
     log_id = None
     tmp_dir = None
@@ -178,6 +214,8 @@ async def execute_task(
             return TooLarge(size_mb=result["file_size_mb"], limit_mb=max_file_size)
 
         task_queue.update_progress(task_id, 100.0, "publishing")
+        if status is not None:
+            status.uploading()
         await update_post_log_status(db, log_id, status="publishing")
         message_id = await publish_video(
             bot, channel_chat_id=task.channel_chat_id, file_path=result["file_path"],

@@ -42,3 +42,20 @@ def test_main_registers_post_stop_hook():
     builder.application_class.assert_called_once_with(BotApplication)
     app.add_handler.assert_any_call("conversation_handler")
     app.run_polling.assert_called_once()
+
+
+def test_main_registers_settings_and_expired_button_handlers():
+    builder = MagicMock()
+    app = MagicMock()
+    for name in ("application_class", "token", "base_url", "base_file_url", "local_mode", "post_init", "post_stop"):
+        getattr(builder, name).return_value = builder
+    builder.build.return_value = app
+
+    with patch("bot.main.ApplicationBuilder", return_value=builder), \
+         patch("bot.main.build_conversation_handler", return_value="conversation_handler"):
+        main()
+
+    patterns = [c.args[0].pattern.pattern for c in app.add_handler.call_args_list
+                if hasattr(c.args[0], "pattern") and c.args[0].pattern is not None]
+    assert r"^set:" in patterns
+    assert r"^(flow|res|ch|card):" in patterns
