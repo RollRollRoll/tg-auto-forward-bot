@@ -11,3 +11,4 @@
 - **Channel**：已配置的发布目标频道。
 - **status message**：每个 Task 在管理员私聊里对应的一条消息，从提交起随 Task 进度原地更新（排队位置、下载进度、转换、上传），直到最终结果。重启恢复的 Task 会另起一条新的 status message。
 - **confirmation card**：TaskDraft 填完后、提交成 Task 之前展示给管理员的摘要（链接、caption、分辨率、Channel），管理员确认后才提交，也可以从这里回去修改某一项或取消。
+- **Tasks 页**：菜单里的 Tasks 和 `/tasks` 命令显示的任务总览，内容相同：正在占用 slot 的 Task、排队中的 Task，以及最近结束（Done 或 Failed）的几条 post log。所有管理员看到的是同一份。
