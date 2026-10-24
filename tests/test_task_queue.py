@@ -161,48 +161,6 @@ async def test_sqlite_store_round_trip(db):
 
 
 @pytest.mark.asyncio
-async def test_failing_on_queued_callback_cleans_up_without_leaking_a_slot():
-    store = InMemoryTaskStore()
-    queue = TaskQueue(store)
-    first = await queue.submit(_task("https://a"), max_slots=1)
-    second = await queue.submit(_task("https://b"), max_slots=1)
-    third = await queue.submit(_task("https://c"), max_slots=1)
-
-    async def notify_fails(ticket):
-        raise RuntimeError("blocked by user")
-
-    with pytest.raises(RuntimeError):
-        async with queue.slot(second, on_queued=notify_fails):
-            pass
-
-    assert [r["source_url"] for r in await store.list()] == ["https://a", "https://c"]
-    async with queue.slot(first):
-        pass
-    # b 失败后不占 slot，c 能拿到唯一的 slot
-    assert [t["url"] for t in queue.get_active_tasks()] == ["https://c"]
-    async with queue.slot(third):
-        pass
-    assert queue.get_active_tasks() == [] and await store.list() == []
-
-
-@pytest.mark.asyncio
-async def test_on_queued_is_called_only_for_queued_tickets():
-    queue = TaskQueue(InMemoryTaskStore())
-    seen = []
-
-    async def on_queued(ticket):
-        seen.append(ticket.position)
-
-    first = await queue.submit(_task("https://a"), max_slots=1)
-    second = await queue.submit(_task("https://b"), max_slots=1)
-    async with queue.slot(first, on_queued=on_queued):
-        pass
-    async with queue.slot(second, on_queued=on_queued):
-        pass
-    assert seen == [1]
-
-
-@pytest.mark.asyncio
 async def test_snapshots_keep_the_shape_used_by_the_tasks_view():
     queue = TaskQueue(InMemoryTaskStore())
     first = await queue.submit(_task("https://a"), max_slots=1)
@@ -212,3 +170,88 @@ async def test_snapshots_keep_the_shape_used_by_the_tasks_view():
     assert (active["task_id"], active["status"]) == (first.task_id, "starting")
     assert set(queued) == set(active) | {"position"}
     assert (queued["task_id"], queued["status"], queued["position"]) == (second.task_id, "queued", 1)
+
+
+@pytest.mark.asyncio
+async def test_queued_tasks_are_told_when_their_position_moves_up():
+    queue = TaskQueue(InMemoryTaskStore())
+    first = await queue.submit(_task("https://a"), max_slots=1)
+    second = await queue.submit(_task("https://b"), max_slots=1)
+    third = await queue.submit(_task("https://c"), max_slots=1)
+    moves = {"b": [], "c": []}
+
+    async def wait(ticket, key):
+        async with queue.slot(ticket, on_position_changed=moves[key].append):
+            pass
+
+    waiting = [asyncio.create_task(wait(second, "b")), asyncio.create_task(wait(third, "c"))]
+    await asyncio.sleep(0)
+    async with queue.slot(first):
+        pass
+    await asyncio.gather(*waiting)
+    # a 完成后 b 拿到 slot（不再排队，不通知），c 从第 2 位升到第 1 位
+    assert moves == {"b": [], "c": [1]}
+
+
+@pytest.mark.asyncio
+async def test_failing_position_callback_does_not_break_the_queue():
+    queue = TaskQueue(InMemoryTaskStore())
+    first = await queue.submit(_task("https://a"), max_slots=1)
+    second = await queue.submit(_task("https://b"), max_slots=1)
+    third = await queue.submit(_task("https://c"), max_slots=1)
+
+    def boom(position):
+        raise RuntimeError("edit failed")
+
+    async def wait(ticket):
+        async with queue.slot(ticket, on_position_changed=boom) as ok:
+            assert ok
+
+    waiting = [asyncio.create_task(wait(second)), asyncio.create_task(wait(third))]
+    await asyncio.sleep(0)
+    async with queue.slot(first):
+        pass
+    await asyncio.wait_for(asyncio.gather(*waiting), 1)
+    assert queue.get_active_tasks() == [] and queue.get_queued_tasks() == []
+
+
+@pytest.mark.asyncio
+async def test_position_change_before_waiting_is_reported_when_the_listener_attaches():
+    queue = TaskQueue(InMemoryTaskStore())
+    first = await queue.submit(_task("https://a"), max_slots=1)
+    await queue.submit(_task("https://b"), max_slots=1)
+    third = await queue.submit(_task("https://c"), max_slots=1)
+    assert third.position == 2
+    # c 提交后、开始等待前，前面的 b 已经出队（例如期间有网络调用）
+    async with queue.slot(first):
+        pass
+    moves = []
+
+    async def wait():
+        async with queue.slot(third, on_position_changed=moves.append):
+            pass
+
+    waiting = asyncio.create_task(wait())
+    await asyncio.sleep(0)
+    assert moves == [1]
+    waiting.cancel()
+
+
+@pytest.mark.asyncio
+async def test_raising_max_slots_on_submit_reports_new_positions():
+    queue = TaskQueue(InMemoryTaskStore())
+    await queue.submit(_task("https://a"), max_slots=1)
+    await queue.submit(_task("https://b"), max_slots=1)
+    third = await queue.submit(_task("https://c"), max_slots=1)
+    moves = []
+
+    async def wait():
+        async with queue.slot(third, on_position_changed=moves.append):
+            pass
+
+    waiting = asyncio.create_task(wait())
+    await asyncio.sleep(0)
+    # 调大并发后 b 被放行，c 升到第 1 位
+    await queue.submit(_task("https://d"), max_slots=2)
+    assert moves == [1]
+    waiting.cancel()

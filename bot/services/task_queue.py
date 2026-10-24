@@ -1,12 +1,16 @@
 from __future__ import annotations
 import asyncio
+import logging
 import time
+from collections.abc import Callable
 from contextlib import asynccontextmanager
 from dataclasses import asdict, dataclass, fields
 
 from bot.database.crud import (
     create_pending_task, delete_pending_task, list_pending_tasks, mark_pending_task_running,
 )
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -84,6 +88,9 @@ class TaskQueue:
         # 排队中的任务，dict 保持插入顺序，即先进先出
         self._queue: dict[int, dict] = {}
         self._waiters: dict[int, asyncio.Future] = {}
+        # 排队任务的位置变化回调，以及上次通知的位置
+        self._position_listeners: dict[int, Callable[[int], None]] = {}
+        self._notified_positions: dict[int, int] = {}
         self._max_slots = 1
         self._closed = False
         self._lock = asyncio.Lock()
@@ -118,6 +125,7 @@ class TaskQueue:
             # 每次登记都以最新的并发设置为准；设置调大后可以立刻放行排队任务
             self._max_slots = max_slots
             self._promote()
+            self._notify_positions()
             info = {
                 "url": task.source_url, "user_id": task.user_id,
                 "start_time": time.time(), "progress": 0.0,
@@ -134,13 +142,12 @@ class TaskQueue:
             return Ticket(task_id=task_id, position=len(self._queue))
 
     @asynccontextmanager
-    async def slot(self, ticket: Ticket, *, on_queued=None):
+    async def slot(self, ticket: Ticket, *, on_position_changed: Callable[[int], None] | None = None):
         """等待并占用 slot。
 
         拿到时 yield True，退出后释放 slot 并删除 pending 记录；
         队列已关闭时 yield False，pending 记录保留，重启后由 restore() 恢复。
-        on_queued(ticket) 在排队任务开始等待前调用（如通知用户排队位置），
-        它抛异常时同样释放 slot 并删除记录，不会占着 slot 不放。
+        on_position_changed(position) 在排队期间位置变化时同步调用；它抛出的异常只记日志，不影响排队。
         """
         task_id = ticket.task_id
         keep_pending = False
@@ -149,8 +156,11 @@ class TaskQueue:
                 keep_pending = True
                 yield False
                 return
-            if ticket.position > 0 and on_queued is not None:
-                await on_queued(ticket)
+            if on_position_changed is not None and task_id in self._queue:
+                self._position_listeners[task_id] = on_position_changed
+                # 调用方已经按 ticket.position 显示过；之后位置不同就通知
+                self._notified_positions[task_id] = ticket.position
+                self._notify_positions()
             waiter = self._waiters.get(task_id)
             got = await waiter if waiter is not None else task_id in self._tasks
             if not got:
@@ -175,6 +185,8 @@ class TaskQueue:
                 waiter.set_result(False)
         self._waiters.clear()
         self._queue.clear()
+        self._position_listeners.clear()
+        self._notified_positions.clear()
 
     async def _release(self, task_id: int) -> None:
         async with self._lock:
@@ -184,6 +196,22 @@ class TaskQueue:
             if waiter is not None and not waiter.done():
                 waiter.cancel()
             self._promote()
+            self._notify_positions()
+
+    def _notify_positions(self) -> None:
+        # 只通知仍在排队、且位置和上次通知不同的任务；已出队的任务清掉回调
+        for task_id in [t for t in self._position_listeners if t not in self._queue]:
+            self._position_listeners.pop(task_id, None)
+            self._notified_positions.pop(task_id, None)
+        for position, task_id in enumerate(self._queue, start=1):
+            listener = self._position_listeners.get(task_id)
+            if listener is None or self._notified_positions.get(task_id) == position:
+                continue
+            self._notified_positions[task_id] = position
+            try:
+                listener(position)
+            except Exception:
+                logger.warning("Position callback failed for task %d", task_id, exc_info=True)
 
     def _promote(self) -> None:
         # 按入队顺序把排队任务移入空闲槽位
