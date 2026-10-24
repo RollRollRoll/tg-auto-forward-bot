@@ -88,9 +88,11 @@ async def update_post_log_status(db: aiosqlite.Connection, log_id: int, *, statu
     await db.commit()
 
 
-async def list_recent_post_logs(db: aiosqlite.Connection, *, limit: int = 5) -> list[dict]:
+async def list_finished_post_logs(db: aiosqlite.Connection, *, limit: int = 5) -> list[dict]:
+    # 最近结束（done / failed）的 post log，按结束时间倒序
     cursor = await db.execute(
-        "SELECT source_url, status, error_message, created_at FROM post_logs ORDER BY created_at DESC LIMIT ?",
+        "SELECT source_url, status, error_message, channel_chat_id, message_id, updated_at FROM post_logs "
+        "WHERE status IN ('done', 'failed') ORDER BY updated_at DESC, id DESC LIMIT ?",
         (limit,),
     )
     return [dict(row) for row in await cursor.fetchall()]

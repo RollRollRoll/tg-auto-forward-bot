@@ -11,6 +11,7 @@ from bot.database.crud import create_post_log, get_setting, list_channels, updat
 from bot.services.downloader import check_disk_space, download_video
 from bot.services.publisher import publish_video
 from bot.services.task_queue import Task, Ticket, TaskQueue
+from bot.ui.channels import channel_info
 from bot.ui.markup import post_link
 from bot.ui.sender import RichSender
 from bot.ui.status import ChatEditLimiter, StatusReporter
@@ -115,19 +116,6 @@ async def restore_pending_tasks(application) -> int:
     return len(resumed)
 
 
-async def _channel_info(bot: Bot, db, chat_id: int) -> tuple[str, str | None]:
-    """返回 (频道标题, username)。username 用来拼帖子链接，取不到时按私有频道处理。"""
-    title = next((ch["title"] for ch in await list_channels(db) if ch["chat_id"] == chat_id), None)
-    username = None
-    try:
-        chat = await bot.get_chat(chat_id)
-        username = getattr(chat, "username", None)
-        title = title or getattr(chat, "title", None)
-    except Exception:
-        logger.warning("Failed to get chat info for channel %d", chat_id)
-    return title or str(chat_id), username
-
-
 async def _process(
     *, bot: Bot, db, task_queue: TaskQueue, ticket: Ticket, task: Task,
     max_concurrent: int, max_file_size: int, limiter: ChatEditLimiter, restored: bool = False,
@@ -138,7 +126,7 @@ async def _process(
         await bot.send_message(chat_id=user_chat_id, text=_SAVED_FOR_RESTART)
         return
 
-    channel_title, channel_username = await _channel_info(bot, db, task.channel_chat_id)
+    channel_title, channel_username = await channel_info(bot, await list_channels(db), task.channel_chat_id)
     status = StatusReporter(
         RichSender(bot), limiter, chat_id=user_chat_id, url=task.source_url,
         channel_title=channel_title, resolution=task.max_resolution, restored=restored,

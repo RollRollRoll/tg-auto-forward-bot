@@ -15,7 +15,7 @@ from bot.handlers.admin import (
     tasks_handler,
 )
 from bot.handlers.conversation import BUTTON_PATTERN, build_conversation_handler, expired_button_handler
-from bot.handlers.menu import menu_callback_handler, settings_callback_handler
+from bot.handlers.menu import menu_callback_handler, settings_callback_handler, tasks_refresh_handler
 from bot.handlers.start import help_handler, start_handler
 from bot.services.downloader import cleanup_stale_files
 from bot.services.pipeline import restore_pending_tasks
@@ -121,6 +121,7 @@ def main() -> None:
     app.add_handler(CommandHandler("tasks", tasks_handler))
     app.add_handler(CallbackQueryHandler(menu_callback_handler, pattern=r"^menu:"))
     app.add_handler(CallbackQueryHandler(settings_callback_handler, pattern=r"^set:"))
+    app.add_handler(CallbackQueryHandler(tasks_refresh_handler, pattern=r"^tasks:refresh$"))
     # 不属于任何进行中会话的流程按钮（已提交、已取消或 Bot 重启过），统一提示过期
     app.add_handler(CallbackQueryHandler(expired_button_handler, pattern=BUTTON_PATTERN))
     logger.info("Starting bot polling...")

@@ -166,7 +166,8 @@ async def test_snapshots_keep_the_shape_used_by_the_tasks_view():
     first = await queue.submit(_task("https://a"), max_slots=1)
     second = await queue.submit(_task("https://b"), max_slots=1)
     active, queued = queue.get_active_tasks()[0], queue.get_queued_tasks()[0]
-    assert set(active) == {"task_id", "elapsed", "url", "user_id", "start_time", "progress", "status"}
+    assert set(active) == {"task_id", "elapsed", "url", "user_id", "channel_chat_id", "start_time", "progress", "status"}
+    assert active["channel_chat_id"] == -100
     assert (active["task_id"], active["status"]) == (first.task_id, "starting")
     assert set(queued) == set(active) | {"position"}
     assert (queued["task_id"], queued["status"], queued["position"]) == (second.task_id, "queued", 1)

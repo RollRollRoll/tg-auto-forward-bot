@@ -58,4 +58,5 @@ def test_main_registers_settings_and_expired_button_handlers():
     patterns = [c.args[0].pattern.pattern for c in app.add_handler.call_args_list
                 if hasattr(c.args[0], "pattern") and c.args[0].pattern is not None]
     assert r"^set:" in patterns
+    assert r"^tasks:refresh$" in patterns
     assert r"^(flow|res|ch|card):" in patterns

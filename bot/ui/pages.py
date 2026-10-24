@@ -1,14 +1,18 @@
 """菜单各页和列表命令的内容。菜单页和对应命令（/tasks、/settings、/list_*）共用同一份渲染。"""
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 from telegram import InlineKeyboardMarkup
 
 from bot.config import SUPER_ADMIN_ID
 from bot.database.connection import get_db
-from bot.database.crud import get_all_settings, get_setting, list_admins, list_channels, list_recent_post_logs
+from bot.database.crud import get_all_settings, get_setting, list_admins, list_channels, list_finished_post_logs
 from bot.ui.keyboards import btn as _btn, rows as _rows
-from bot.ui.markup import fmt_duration, h, md, md_code, md_join, progress_bar
+from bot.ui.channels import channel_info
+from bot.ui.markup import fmt_duration, h, md, md_code, md_join, post_link, progress_bar, relative_time, short_url
 from bot.ui.sender import Card
+from bot.ui.stages import QUEUE_STATUS_STAGES, STAGE_ICONS, STAGE_NAMES
 
 # Settings 页可以点选的预设值：(值, 按钮文字)
 SETTING_PRESETS: dict[str, list[tuple[str, str]]] = {
@@ -46,6 +50,11 @@ def back_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([[_btn("« Back", "menu:back")]])
 
 
+# 菜单里的 Tasks 页沿用 menu:tasks 刷新；/tasks 的回复用 tasks:refresh，刷新后仍然只有 Refresh
+TASKS_MENU_KEYBOARD = InlineKeyboardMarkup([[_btn("🔄 Refresh", "menu:tasks"), _btn("« Back", "menu:back")]])
+TASKS_COMMAND_KEYBOARD = InlineKeyboardMarkup([[_btn("🔄 Refresh", "tasks:refresh")]])
+
+
 def main_menu(user_id: int) -> Card:
     rows = [[_btn("📋 Tasks", "menu:tasks"), _btn("📢 Channels", "menu:channels")]]
     if user_id == SUPER_ADMIN_ID:
@@ -60,64 +69,105 @@ def main_menu(user_id: int) -> Card:
     return lines.card(InlineKeyboardMarkup(rows))
 
 
-def _short(url: str, limit: int) -> str:
-    return url[:limit] + "..." if len(url) > limit else url
+_REASON_LIMIT = 100
+_RECENT_LIMIT = 5
 
 
-_STATUS_LABELS = {
-    "starting": "Starting",
-    "downloading": "Downloading",
-    "processing": "Processing",
-    "publishing": "Publishing",
-}
-_STATUS_NOTES = {
-    "processing": "Progress: Converting format...",
-    "publishing": "Progress: Uploading to channel...",
-}
-_LOG_LABELS = {"done": "OK", "failed": "FAIL", "downloading": "...", "publishing": "..."}
+def utc_now() -> datetime:
+    """当前 UTC 时间；测试里替换成固定值，让相对时间稳定复现。"""
+    return datetime.now(timezone.utc)
 
 
-async def tasks_page(task_queue, keyboard: InlineKeyboardMarkup | None = None) -> Card:
+def _finished_at(value: str) -> datetime:
+    # post_logs 的时间由 SQLite CURRENT_TIMESTAMP 写入，是 UTC 的 "YYYY-MM-DD HH:MM:SS"
+    return datetime.strptime(value, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+
+
+def _reason(text: str) -> str:
+    return text if len(text) <= _REASON_LIMIT else text[:_REASON_LIMIT] + "…"
+
+
+async def tasks_page(bot, task_queue, keyboard: InlineKeyboardMarkup | None = None) -> Card:
+    """Tasks 页：摘要行，In progress / Queued / Recent 三节。"""
     db = await get_db()
     max_concurrent = int(await get_setting(db, "max_concurrent_downloads") or "2")
+    channels = _Channels(bot, await list_channels(db))
     active = task_queue.get_active_tasks()
+    queued = task_queue.get_queued_tasks()
+
     lines = _Lines()
-    lines.add(f"## {md(f'Active Downloads ({len(active)}/{max_concurrent})')}",
-              f"<b>{h(f'Active Downloads ({len(active)}/{max_concurrent})')}:</b>")
+    lines.add("# 📋 Tasks", "<b>📋 Tasks</b>")
+    lines.text(f"Running {len(active)}/{max_concurrent} · Queued {len(queued)}")
+
+    lines.blank()
+    lines.add("## In progress", "<b>In progress</b>")
     if not active:
         lines.text("No active tasks.")
     for t in active:
-        lines.blank()
-        lines.bold(f"#{t['task_id']} — {_STATUS_LABELS.get(t['status'], t['status'])}")
-        url = _short(t["url"], 50)
-        lines.add(f"URL: {md_code(url)}", f"URL: <code>{h(url)}</code>")
-        if t["status"] == "downloading":
+        stage = QUEUE_STATUS_STAGES.get(t["status"], "starting")
+        channel = await channels.title(t["channel_chat_id"])
+        lines.text(f"{STAGE_ICONS[stage]} {STAGE_NAMES[stage]} · {channel} · {fmt_duration(t['elapsed'])}")
+        _link_line(lines, t["url"])
+        if stage == "downloading":
             bar = f"[{progress_bar(t['progress'])}] {t['progress']:.1f}%"
-            lines.add(f"Progress: {md_code(bar)}", f"Progress: <code>{h(bar)}</code>")
-        elif t["status"] in _STATUS_NOTES:
-            lines.text(_STATUS_NOTES[t["status"]])
-        lines.text(f"Elapsed: {fmt_duration(t['elapsed'])}")
+            lines.add(md_code(bar), f"<code>{h(bar)}</code>")
 
-    queued = task_queue.get_queued_tasks()
     if queued:
         lines.blank()
-        lines.add(f"## {md(f'Queued ({len(queued)})')}", f"<b>{h(f'Queued ({len(queued)})')}:</b>")
+        lines.add("## Queued", "<b>Queued</b>")
         for t in queued:
-            url = _short(t["url"], 45)
-            wait = f"(waiting {fmt_duration(t['elapsed'])})"
-            lines.add(f"{t['position']}\\. {md_code(url)} {md(wait)}", f"{t['position']}. <code>{h(url)}</code> {h(wait)}")
+            channel = await channels.title(t["channel_chat_id"])
+            head = f"{t['position']}. {channel} · waiting {fmt_duration(t['elapsed'])}"
+            lines.text(head)
+            _link_line(lines, t["url"])
 
-    recent = await list_recent_post_logs(db, limit=5)
-    if recent:
-        lines.blank()
-        lines.add("## Recent Tasks", "<b>Recent Tasks:</b>")
-        for r in recent:
-            label = _LOG_LABELS.get(r["status"], r["status"])
-            url = _short(r["source_url"], 45)
-            lines.add(f"{md(f'[{label}]')} {md_code(url)}", f"[{h(label)}] <code>{h(url)}</code>")
-            if r["error_message"]:
-                lines.text(f"Error: {r['error_message'][:60]}")
+    lines.blank()
+    lines.add("## Recent", "<b>Recent</b>")
+    recent = await list_finished_post_logs(db, limit=_RECENT_LIMIT)
+    if not recent:
+        lines.text("No tasks yet.")
+    now = utc_now()
+    for r in recent:
+        title, username = await channels.info(r["channel_chat_id"])
+        done = r["status"] == "done"
+        ago = relative_time((now - _finished_at(r["updated_at"])).total_seconds())
+        head = f"{STAGE_ICONS['done' if done else 'failed']} {title} · {ago}"
+        if done and r["message_id"]:
+            url = post_link(r["channel_chat_id"], username, r["message_id"])
+            lines.add(f"{md(head)} · [Open post]({url})", f'{h(head)} · <a href="{h(url)}">Open post</a>')
+        else:
+            lines.text(head)
+        _link_line(lines, r["source_url"])
+        if not done and r["error_message"]:
+            lines.text(_reason(r["error_message"]))
     return lines.card(keyboard)
+
+
+class _Channels:
+    """Tasks 页里的 Channel 名称和 username，每个 Channel 最多向 Bot 查一次。"""
+
+    def __init__(self, bot, configured: list[dict]):
+        self._bot = bot
+        self._configured = configured
+        self._titles = {ch["chat_id"]: ch["title"] for ch in configured}
+        self._cache: dict[int, tuple[str, str | None]] = {}
+
+    async def info(self, chat_id: int) -> tuple[str, str | None]:
+        # Recent 要拼帖子链接，需要 username，所以已配置的 Channel 也要查
+        if chat_id not in self._cache:
+            self._cache[chat_id] = await channel_info(self._bot, self._configured, chat_id)
+        return self._cache[chat_id]
+
+    async def title(self, chat_id: int) -> str:
+        # 只要名称：已配置的直接用标题，不在配置里（例如提交后被删掉）才向 Bot 查
+        if chat_id in self._titles:
+            return self._titles[chat_id]
+        return (await self.info(chat_id))[0]
+
+
+def _link_line(lines: _Lines, url: str) -> None:
+    short = short_url(url)
+    lines.add(md_code(short), f"<code>{h(short)}</code>")
 
 
 async def channels_page(keyboard: InlineKeyboardMarkup | None = None) -> Card:

@@ -61,6 +61,30 @@ def fmt_duration(seconds: float) -> str:
     return f"{hrs}h {rest // 60}m"
 
 
+def relative_time(seconds_ago: float) -> str:
+    """距离现在多久，例如 "12m ago"。结束时间晚于当前时间（时钟偏差）时按 "just now" 处理。"""
+    seconds = int(seconds_ago)
+    if seconds < 60:
+        return "just now"
+    if seconds < 3600:
+        return f"{seconds // 60}m ago"
+    if seconds < 86400:
+        return f"{seconds // 3600}h ago"
+    return f"{seconds // 86400}d ago"
+
+
+_SHORT_URL_LIMIT = 45
+
+
+def short_url(url: str) -> str:
+    """去掉开头的协议和 www.，超过 45 个字符时保留前 44 个并加 …。"""
+    text = re.sub(r"^https?://", "", url)
+    text = text.removeprefix("www.")
+    if len(text) > _SHORT_URL_LIMIT:
+        return text[:_SHORT_URL_LIMIT - 1] + "…"
+    return text
+
+
 def post_link(channel_chat_id: int, username: str | None, message_id: int) -> str:
     """频道帖子的链接：公开频道用 username，私有频道用 t.me/c/<去掉 -100 的 id>。"""
     if username:

@@ -8,7 +8,7 @@ from bot.database.crud import (
     add_channel, remove_channel,
     get_setting, set_setting,
 )
-from bot.ui.pages import admins_page, channels_page, settings_page, tasks_page
+from bot.ui.pages import TASKS_COMMAND_KEYBOARD, admins_page, channels_page, settings_page, tasks_page
 from bot.ui.sender import reply_card as _reply
 
 
@@ -143,4 +143,4 @@ async def settings_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 @private_chat_only
 @admin_only
 async def tasks_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await _reply(update, context, await tasks_page(context.bot_data["task_queue"]))
+    await _reply(update, context, await tasks_page(context.bot, context.bot_data["task_queue"], TASKS_COMMAND_KEYBOARD))

@@ -1,6 +1,6 @@
 import pytest
 
-from bot.ui.markup import caption_markdown, fmt_duration, fmt_size, md, post_link, progress_bar
+from bot.ui.markup import caption_markdown, fmt_duration, fmt_size, md, post_link, progress_bar, relative_time, short_url
 
 
 @pytest.mark.parametrize("chat_id,username,expected", [
@@ -43,3 +43,26 @@ def test_caption_markdown_keeps_line_breaks():
 
 def test_caption_markdown_keeps_pre_blocks_verbatim():
     assert caption_markdown("<pre>a_b\n*c</pre>") == "```\na_b\n*c\n```"
+
+
+@pytest.mark.parametrize("seconds,expected", [
+    (0, "just now"), (59, "just now"), (60, "1m ago"), (3599, "59m ago"),
+    (3600, "1h ago"), (86399, "23h ago"), (86400, "1d ago"), (3 * 86400 + 5, "3d ago"),
+    # 结束时间晚于当前时间（时钟偏差）
+    (-30, "just now"),
+])
+def test_relative_time(seconds, expected):
+    assert relative_time(seconds) == expected
+
+
+@pytest.mark.parametrize("url,expected", [
+    ("https://www.youtube.com/watch?v=5DslLmsx9s0", "youtube.com/watch?v=5DslLmsx9s0"),
+    ("http://archive.org/details/BigBuckBunny_124", "archive.org/details/BigBuckBunny_124"),
+    # 只去掉开头的 www.，路径里的不动
+    ("https://example.com/www.page", "example.com/www.page"),
+    # 正好 45 个字符不截断，超过时保留 44 个加 …
+    ("https://" + "a" * 45, "a" * 45),
+    ("https://" + "a" * 46, "a" * 44 + "…"),
+])
+def test_short_url(url, expected):
+    assert short_url(url) == expected

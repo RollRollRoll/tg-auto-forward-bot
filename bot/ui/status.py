@@ -14,6 +14,7 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
 from bot.ui.markup import fmt_duration, fmt_size, h, md, md_code, md_join, progress_bar
 from bot.ui.sender import Card, RichSender, SentMessage
+from bot.ui.stages import STAGE_ICONS, STAGE_NAMES
 
 logger = logging.getLogger(__name__)
 
@@ -57,10 +58,6 @@ class ChatEditLimiter:
 
 # 阶段只能前进不能后退；done / failed 是终态
 _RANK = {"queued": 0, "starting": 1, "downloading": 2, "converting": 3, "uploading": 4, "done": 5, "failed": 5}
-_ICONS = {
-    "queued": "⏳", "starting": "⏳", "downloading": "⬇️", "converting": "⚙️",
-    "uploading": "⬆️", "done": "✅", "failed": "❌",
-}
 
 
 class StatusReporter:
@@ -216,20 +213,9 @@ class StatusReporter:
 
     @staticmethod
     def _stage_label(stage: str, position: int) -> str:
-        match stage:
-            case "queued":
-                return f"Queued (#{position})"
-            case "starting":
-                return "Starting"
-            case "downloading":
-                return "Downloading"
-            case "converting":
-                return "Converting"
-            case "uploading":
-                return "Uploading"
-            case "done":
-                return "Done"
-        return "Failed"
+        if stage == "queued":
+            return f"Queued (#{position})"
+        return STAGE_NAMES[stage]
 
     def _progress_lines(self, stage: str) -> tuple[str, str] | None:
         # 只有正在下载时才显示进度；已经进入下一阶段的旧快照不显示
@@ -252,7 +238,7 @@ class StatusReporter:
         return md(tail), h(tail)
 
     def _card(self, stage: str, position: int) -> Card:
-        icon, label = _ICONS[stage], self._stage_label(stage, position)
+        icon, label = STAGE_ICONS[stage], self._stage_label(stage, position)
         elapsed = fmt_duration(self._clock() - self._started_at) if self._started_at is not None else "0s"
         md_lines: list[str] = []
         html_lines: list[str] = []

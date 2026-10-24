@@ -163,14 +163,6 @@ async def test_back_returns_to_main_menu(admin):
 
 
 @pytest.mark.asyncio
-async def test_tasks_page(admin):
-    ctx = _ctx()
-    menu = await _menu(ctx)
-    await _click(ctx, menu, "📋 Tasks")
-    assert "Active Downloads (0/2)" in menu.text and "No active tasks." in menu.text
-
-
-@pytest.mark.asyncio
 async def test_non_admin_buttons_change_nothing(admin):
     ctx = _ctx()
     menu = await _menu(ctx)
@@ -194,7 +186,6 @@ async def test_regular_admin_cannot_open_admins_page(admin):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("handler,heading", [
     (admin_handlers.settings_handler, "Settings"),
-    (admin_handlers.tasks_handler, "Active Downloads"),
     (admin_handlers.list_channels_handler, "No channels configured."),
 ])
 async def test_list_commands_reply_with_the_same_rich_page(admin, handler, heading):
@@ -210,23 +201,6 @@ async def test_list_admins_command_is_rich_for_super_admin(admin):
     await admin_handlers.list_admins_handler(_command(SUPER), ctx)
     msg = ctx.bot.last(CHAT)
     assert msg.format == "rich" and "Admins (1)" in msg.text
-
-
-@pytest.mark.asyncio
-async def test_tasks_page_keeps_the_existing_wording(admin):
-    from bot.services.task_queue import Task
-    ctx = _ctx()
-    queue = ctx.bot_data["task_queue"]
-    ticket = await queue.submit(Task(user_id=1, user_chat_id=1, source_url="https://a", caption="",
-                                     channel_chat_id=-1, max_resolution=720), max_slots=2)
-    queue.update_progress(ticket.task_id, 100.0, "processing")
-    await admin_handlers.tasks_handler(_command(), ctx)
-    text = ctx.bot.last(CHAT).text
-    assert "Processing" in text and "Progress: Converting format..." in text
-    queue.update_progress(ticket.task_id, 100.0, "publishing")
-    await admin_handlers.tasks_handler(_command(), ctx)
-    text = ctx.bot.last(CHAT).text
-    assert "Publishing" in text and "Progress: Uploading to channel..." in text
 
 
 @pytest.mark.asyncio

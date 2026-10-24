@@ -15,8 +15,14 @@ from telegram.error import BadRequest
 
 
 def plain(markdown: str) -> str:
-    """去掉 Rich Markdown 的转义和硬换行，得到大致能看到的文字。"""
-    return re.sub(r"\\(.)", r"\1", markdown.replace("\\\n", "\n"))
+    """去掉 Rich Markdown 的标记、转义和硬换行，得到大致能看到的文字。不追求完全还原排版。"""
+    text = markdown.replace("\\\n", "\n")
+    text = re.sub(r"^#{1,6} ", "", text, flags=re.M)
+    # 先处理未转义的标记，再去掉转义：转义过的 \[ \* \` 是字面字符
+    text = re.sub(r"(?<!\\)\[([^\]]*)\]\([^)]*\)", r"\1", text)
+    text = re.sub(r"(?<!\\)\*\*", "", text)
+    text = re.sub(r"(?<!\\)`", "", text)
+    return re.sub(r"\\(.)", r"\1", text)
 
 
 @dataclass

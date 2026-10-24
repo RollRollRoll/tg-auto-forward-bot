@@ -128,6 +128,8 @@ class TaskQueue:
             self._notify_positions()
             info = {
                 "url": task.source_url, "user_id": task.user_id,
+                # Tasks 页按它显示 Channel 名称
+                "channel_chat_id": task.channel_chat_id,
                 "start_time": time.time(), "progress": 0.0,
                 # 已拿到 slot、还没开始下载
                 "status": "starting",
