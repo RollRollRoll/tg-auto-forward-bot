@@ -227,3 +227,19 @@ async def test_tasks_page_keeps_the_existing_wording(admin):
     await admin_handlers.tasks_handler(_command(), ctx)
     text = ctx.bot.last(CHAT).text
     assert "Publishing" in text and "Progress: Uploading to channel..." in text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("label", [None, "📋 Tasks", "📢 Channels", "⚙️ Settings", "👤 Admins", "❓ Help"])
+async def test_heading_lines_never_end_with_a_backslash(admin, label):
+    # Rich Markdown 的标题行不能硬换行，行尾的反斜杠会原样显示出来
+    await add_channel(admin, chat_id=-100123, title="Demo")
+    ctx = _ctx()
+    menu = await _menu(ctx, user_id=SUPER)
+    if label is not None:
+        await _click(ctx, menu, label, user_id=SUPER)
+    if label == "⚙️ Settings":
+        await _click(ctx, menu, "max_resolution: 1080", user_id=SUPER)
+    headings = [line for line in menu.content.splitlines() if line.startswith("#")]
+    assert headings
+    assert [line for line in headings if line.endswith("\\")] == []

@@ -28,10 +28,12 @@ def md_join(lines: list[str]) -> str:
     """把多行拼成 Rich Markdown：相邻的非空行之间用硬换行，空行保留成段落分隔。
 
     Rich Markdown 兼容 GFM，普通换行会被合并成空格，所以行尾要加反斜杠。
+    标题行本身就单独成块，加了反斜杠反而会原样显示出来，所以标题行不加。
     """
     out = []
     for line, nxt in zip(lines, lines[1:] + [""]):
-        out.append(line + "\\" if line and nxt else line)
+        hard_break = line and nxt and not line.startswith("#")
+        out.append(line + "\\" if hard_break else line)
     return "\n".join(out)
 
 
