@@ -1,7 +1,9 @@
 import pytest
 import yt_dlp
 
+from bot.services import downloader
 from bot.services.downloader import _build_format_spec, _short_side
+from bot.services.sources import NoSingleVideo
 
 
 def _fmt(fid, w, h, vcodec="avc1.64001F", acodec="none", ext="mp4"):
@@ -47,3 +49,56 @@ def test_format_spec_prefers_higher_resolution_over_low_merged_format(limit, exp
 def test_format_spec_portrait_merged_only():
     formats = [_fmt("pm720", 720, 1280, acodec="mp4a.40.2"), _fmt("pm1080", 1080, 1920, acodec="mp4a.40.2")]
     assert _select(formats, 720) == "pm720"
+
+
+# ---- 合集识别 ----
+
+_PLAYLIST = {"_type": "playlist", "extractor": "generic", "title": "list",
+             "entries": [{"_type": "url", "url": "http://example.invalid/a"},
+                         {"_type": "url", "url": "http://example.invalid/b"}]}
+
+
+@pytest.mark.parametrize("info, expected", [
+    (_PLAYLIST, True),
+    ({"_type": "multi_video", "entries": []}, True),
+    ({"entries": []}, True),
+    ({"id": "v", "formats": [_fmt("v720", 1280, 720)]}, False),
+])
+def test_is_playlist(info, expected):
+    assert downloader._is_playlist(info) is expected
+
+
+async def test_extract_rejects_playlist(monkeypatch):
+    monkeypatch.setattr(downloader, "_do_extract", lambda opts, url: dict(_PLAYLIST))
+    with pytest.raises(NoSingleVideo, match="playlist"):
+        await downloader.extract_available_resolutions("https://example.com/list")
+
+
+async def test_extract_uses_resolved_url_and_skips_playlists(monkeypatch):
+    seen = {}
+
+    async def _resolve(url):
+        return "https://video.example/main.m3u8"
+
+    def _extract(opts, url):
+        seen.update(opts=opts, url=url)
+        return {"id": "v", "formats": [_fmt("v720", 1280, 720), _fmt("v360", 640, 360)]}
+
+    monkeypatch.setattr(downloader, "resolve_source_url", _resolve)
+    monkeypatch.setattr(downloader, "_do_extract", _extract)
+    assert await downloader.extract_available_resolutions("https://bad.news/t/1") == [360, 720]
+    assert seen["url"] == "https://video.example/main.m3u8"
+    assert seen["opts"]["noplaylist"] is True
+
+
+async def test_download_stops_before_downloading_playlist(monkeypatch, tmp_path):
+    processed = []
+    monkeypatch.setattr(downloader, "DOWNLOAD_DIR", str(tmp_path))
+    monkeypatch.setattr(yt_dlp.YoutubeDL, "extract_info", lambda self, url, download=True: dict(_PLAYLIST))
+    monkeypatch.setattr(yt_dlp.YoutubeDL, "process_ie_result",
+                        lambda self, info, download=True: processed.append(info))
+    with pytest.raises(RuntimeError, match="playlist"):
+        await downloader.download_video("https://example.com/list")
+    assert processed == []
+    # 临时目录要清理掉
+    assert list(tmp_path.iterdir()) == []

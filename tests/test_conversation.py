@@ -8,6 +8,7 @@ from telegram.ext import ConversationHandler
 
 from bot.database.crud import add_admin, add_channel
 from bot.handlers import conversation as conv
+from bot.services.sources import NoSingleVideo
 from bot.services.task_queue import Task
 from tests.fakebot import FakeBot
 
@@ -192,6 +193,17 @@ async def test_no_video_ends_the_flow(admin):
     with _resolutions():
         assert await conv.skip_caption_handler(_text("/skip"), ctx) == ConversationHandler.END
     assert "No video found" in ctx.bot.last(CHAT).text
+    assert "draft" not in ctx.user_data
+
+
+@pytest.mark.asyncio
+async def test_playlist_link_ends_the_flow_with_its_own_message(admin):
+    ctx = _ctx()
+    await conv.entry_handler(_text(URL), ctx)
+    with patch("bot.handlers.conversation.extract_available_resolutions", new_callable=AsyncMock,
+               side_effect=NoSingleVideo("This link is a playlist or list page, not a single video.")):
+        assert await conv.skip_caption_handler(_text("/skip"), ctx) == ConversationHandler.END
+    assert "playlist" in ctx.bot.last(CHAT).text
     assert "draft" not in ctx.user_data
 
 

@@ -14,6 +14,7 @@ from bot.database.crud import get_setting, list_channels
 from bot.handlers.filters import admin_only, private_chat_only
 from bot.services.downloader import extract_available_resolutions
 from bot.services.pipeline import download_and_publish
+from bot.services.sources import NoSingleVideo
 from bot.services.task_queue import Task
 from bot.ui.cards import caption_prompt, confirmation_card, notice
 from bot.ui.keyboards import btn as _btn, rows as _rows
@@ -281,13 +282,17 @@ async def caption_button_handler(update: Update, context: ContextTypes.DEFAULT_T
 async def _fetch_and_ask_resolution(update: Update, context) -> int:
     draft: TaskDraft = context.user_data["draft"]
     status = await _send(update, context, notice("Checking available resolutions..."))
+    message = "No video found at this URL, or the site is not supported."
     try:
         heights = await extract_available_resolutions(draft.source_url)
-    except Exception:
-        logger.warning("Failed to extract formats for %s", draft.source_url)
+    except NoSingleVideo as e:
+        message = str(e)
+        heights = []
+    except Exception as e:
+        logger.warning("Failed to extract formats for %s: %s", draft.source_url, e)
         heights = []
     if not heights:
-        await _edit(context, status, notice("No video found at this URL, or the site is not supported."))
+        await _edit(context, status, notice(message))
         await _discard(context)
         return ConversationHandler.END
 

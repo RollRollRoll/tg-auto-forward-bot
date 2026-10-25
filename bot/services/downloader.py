@@ -1,5 +1,6 @@
 from __future__ import annotations
 import asyncio
+import logging
 import os
 import shutil
 import tempfile
@@ -9,18 +10,32 @@ from pathlib import Path
 import yt_dlp
 
 from bot.config import COOKIES_FILE, DOWNLOAD_DIR
+from bot.services.sources import NoSingleVideo, resolve_source_url
+
+logger = logging.getLogger(__name__)
+
+_PLAYLIST_MESSAGE = "This link is a playlist or list page, not a single video."
 
 
 async def extract_available_resolutions(url: str) -> list[int]:
     ydl_opts = {
         "quiet": True,
         "no_warnings": True,
+        "noplaylist": True,
+        # 合集的条目只列出、不逐个解析，识别合集时不用把每个条目都请求一遍
+        "extract_flat": "in_playlist",
     }
     if os.path.isfile(COOKIES_FILE):
         ydl_opts["cookiefile"] = COOKIES_FILE
 
+    video_url = await resolve_source_url(url)
     loop = asyncio.get_running_loop()
-    info = await loop.run_in_executor(None, _do_extract, ydl_opts, url)
+    info = await loop.run_in_executor(None, _do_extract, ydl_opts, video_url)
+
+    if _is_playlist(info):
+        logger.info("Playlist result for %s (extractor=%s, type=%s)",
+                    url, info.get("extractor"), info.get("_type"))
+        raise NoSingleVideo(_PLAYLIST_MESSAGE)
 
     formats = info.get("formats") or []
     sides: set[int] = set()
@@ -29,7 +44,13 @@ async def extract_available_resolutions(url: str) -> list[int]:
         if side:
             sides.add(side)
 
+    if not sides:
+        logger.info("No video formats for %s (extractor=%s)", url, info.get("extractor"))
     return sorted(sides)
+
+
+def _is_playlist(info: dict) -> bool:
+    return info.get("_type") in ("playlist", "multi_video") or "entries" in info
 
 
 def _short_side(f: dict) -> int | None:
@@ -99,6 +120,12 @@ async def download_video(
     max_resolution: int = 1080,
     progress_callback: callable | None = None,
 ) -> dict:
+    try:
+        # 每次下载都重新解析：解析出的视频地址可能带有时效
+        video_url = await resolve_source_url(url)
+    except Exception as e:
+        raise RuntimeError(f"Download failed: {e}") from e
+
     os.makedirs(DOWNLOAD_DIR, exist_ok=True)
     tmp_dir = tempfile.mkdtemp(dir=DOWNLOAD_DIR)
     os.chmod(tmp_dir, 0o755)
@@ -115,6 +142,9 @@ async def download_video(
         },
         "quiet": True,
         "no_warnings": True,
+        "noplaylist": True,
+        # 合集的条目只列出、不逐个解析，识别合集时不用把每个条目都请求一遍
+        "extract_flat": "in_playlist",
     }
 
     if progress_callback is not None:
@@ -125,7 +155,7 @@ async def download_video(
 
     loop = asyncio.get_running_loop()
     try:
-        info = await loop.run_in_executor(None, _do_download, ydl_opts, url)
+        info = await loop.run_in_executor(None, _do_download, ydl_opts, video_url)
     except Exception as e:
         shutil.rmtree(tmp_dir, ignore_errors=True)
         raise RuntimeError(f"Download failed: {e}") from e
@@ -149,5 +179,8 @@ async def download_video(
 
 def _do_download(ydl_opts: dict, url: str) -> dict:
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(url, download=True)
-        return info or {}
+        # 先只解析不下载：合集要在下载前拦下，否则会把所有条目都下载下来
+        info = ydl.extract_info(url, download=False) or {}
+        if _is_playlist(info):
+            raise NoSingleVideo(_PLAYLIST_MESSAGE)
+        return ydl.process_ie_result(info, download=True) or {}
