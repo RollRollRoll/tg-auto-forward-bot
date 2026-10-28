@@ -16,6 +16,9 @@ logger = logging.getLogger(__name__)
 
 _PLAYLIST_MESSAGE = "This link is a playlist or list page, not a single video."
 
+# 有视频但拿不到宽高（比如 mp4 直链）时的分辨率，表示不限制分辨率、直接下载原文件
+ORIGINAL_RESOLUTION = 0
+
 
 async def extract_available_resolutions(url: str) -> list[int]:
     ydl_opts = {
@@ -45,6 +48,10 @@ async def extract_available_resolutions(url: str) -> list[int]:
             sides.add(side)
 
     if not sides:
+        # 有视频格式只是缺宽高（vcodec 为 None 表示未知，"none" 才是纯音频）
+        if any(f.get("vcodec") != "none" for f in formats):
+            logger.info("Unknown resolution for %s (extractor=%s)", url, info.get("extractor"))
+            return [ORIGINAL_RESOLUTION]
         logger.info("No video formats for %s (extractor=%s)", url, info.get("extractor"))
     return sorted(sides)
 
@@ -62,6 +69,8 @@ def _short_side(f: dict) -> int | None:
 
 
 def _build_format_spec(max_resolution: int) -> str:
+    if max_resolution == ORIGINAL_RESOLUTION:
+        return "bestvideo*+bestaudio/best"
     # 短边不超过 max_resolution：横屏（宽高比 >= 1）限制高度，竖屏限制宽度
     limits = (
         f"[aspect_ratio>=1][height<={max_resolution}]",

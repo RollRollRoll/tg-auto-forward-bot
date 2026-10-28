@@ -51,6 +51,24 @@ def test_format_spec_portrait_merged_only():
     assert _select(formats, 720) == "pm720"
 
 
+# mp4 直链（如 video.twimg.com）：yt-dlp 只给一个格式，宽高和编码都未知
+_DIRECT = {"format_id": "mp4", "url": "http://example.invalid/v.mp4", "ext": "mp4", "protocol": "https"}
+
+
+def test_format_spec_original_picks_direct_file():
+    assert _select([_DIRECT], downloader.ORIGINAL_RESOLUTION) == "mp4"
+
+
+@pytest.mark.parametrize("formats, expected", [
+    ([_DIRECT], [downloader.ORIGINAL_RESOLUTION]),
+    ([_AUDIO], []),
+    ([], []),
+])
+async def test_extract_without_sizes(monkeypatch, formats, expected):
+    monkeypatch.setattr(downloader, "_do_extract", lambda opts, url: {"id": "v", "formats": formats})
+    assert await downloader.extract_available_resolutions("https://video.example/v.mp4") == expected
+
+
 # ---- 合集识别 ----
 
 _PLAYLIST = {"_type": "playlist", "extractor": "generic", "title": "list",

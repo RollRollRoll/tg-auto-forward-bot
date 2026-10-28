@@ -197,6 +197,16 @@ async def test_no_video_ends_the_flow(admin):
 
 
 @pytest.mark.asyncio
+async def test_unknown_resolution_downloads_the_original(admin):
+    await _channels(admin, "Demo")
+    ctx = _ctx()
+    card = await _to_card(ctx, heights=(0,))
+    assert "Original" in card.text
+    assert ctx.user_data["draft"].max_resolution == 0
+    assert _labels(card) == ["✅ Confirm", "✏️ Edit", "✖ Cancel"]
+
+
+@pytest.mark.asyncio
 async def test_playlist_link_ends_the_flow_with_its_own_message(admin):
     ctx = _ctx()
     await conv.entry_handler(_text(URL), ctx)

@@ -246,10 +246,12 @@ class StatusReporter:
             md_lines.append("🔄 Bot restarted, resuming")
             html_lines.append("🔄 Bot restarted, resuming")
         # 头部：这个 Task 的链接、Channel、分辨率，同时运行多个 Task 时用来区分
+        # 分辨率 0 表示拿不到宽高、直接下载原文件
+        resolution = f"{self._resolution}p" if self._resolution else "Original"
         md_lines += [f"Link: {md_code(self._url)}",
-                     f"Channel: {md(self._channel_title)}", f"Resolution: {self._resolution}p", ""]
+                     f"Channel: {md(self._channel_title)}", f"Resolution: {resolution}", ""]
         html_lines += [f"Link: <code>{h(self._url)}</code>",
-                       f"Channel: {h(self._channel_title)}", f"Resolution: {self._resolution}p", ""]
+                       f"Channel: {h(self._channel_title)}", f"Resolution: {resolution}", ""]
         md_lines.append(f"**{icon} {md(label)}**")
         html_lines.append(f"<b>{icon} {h(label)}</b>")
         progress = self._progress_lines(stage)

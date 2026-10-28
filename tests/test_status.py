@@ -18,11 +18,21 @@ def _setup():
     return clock, bot, limiter
 
 
-def _reporter(bot, limiter, url="https://e.com/v/1", restored=False):
+def _reporter(bot, limiter, url="https://e.com/v/1", restored=False, resolution=720):
     return StatusReporter(
         RichSender(bot), limiter, chat_id=CHAT, url=url,
-        channel_title="Demo", resolution=720, restored=restored,
+        channel_title="Demo", resolution=resolution, restored=restored,
     )
+
+
+@pytest.mark.asyncio
+async def test_unknown_resolution_shows_original():
+    clock, bot, limiter = _setup()
+    rep = _reporter(bot, limiter, resolution=0)
+    rep.start(0)
+    await rep.wait_idle()
+    text = bot.last(CHAT).text
+    assert "Resolution: Original" in text and "0p" not in text
 
 
 def _edits(bot, message_id=None):

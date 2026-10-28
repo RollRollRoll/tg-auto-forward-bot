@@ -12,7 +12,7 @@ from telegram.ext import (
 from bot.database.connection import get_db
 from bot.database.crud import get_setting, list_channels
 from bot.handlers.filters import admin_only, private_chat_only
-from bot.services.downloader import extract_available_resolutions
+from bot.services.downloader import ORIGINAL_RESOLUTION, extract_available_resolutions
 from bot.services.pipeline import download_and_publish
 from bot.services.sources import NoSingleVideo
 from bot.services.task_queue import Task
@@ -60,6 +60,7 @@ BUTTON_PATTERN = r"^(flow|res|ch|card):"
 _EXPIRED = "This action has expired"
 
 _RESOLUTION_LABELS = {
+    ORIGINAL_RESOLUTION: "Original",
     240: "240p", 360: "360p", 480: "480p",
     720: "720p HD", 1080: "1080p FHD",
     1440: "1440p 2K", 2160: "4K",
